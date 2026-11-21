@@ -40,7 +40,7 @@ curl -i https://<공개 도메인>/healthz
 curl -i https://<공개 도메인>/mcp
 ```
 
-첫 요청은 `200 OK`와 `ok`를 반환하고 두 번째 요청은 `401 Unauthorized`를 반환해야 한다. 클라이언트에 `MCP_API_TOKEN`과 같은 값을 `TEXT2SQL_MCP_TOKEN`으로 설정한 뒤 HTTP MCP 서버를 등록한다. `graph_list_models()`가 `olist_sales`를 반환하면 AuraDB까지 연결된 것이다. 빈 결과라면 AuraDB에서 활성 모델을 확인한다.
+첫 요청은 `200 OK`와 `ok`를 반환하고 두 번째 요청은 `401 Unauthorized`를 반환해야 한다. 클라이언트의 MCP 서버 설정에서 `Authorization: Bearer <MCP_API_TOKEN 값>` 헤더를 지정한다. `graph_list_models()`가 `olist_sales`를 반환하면 AuraDB까지 연결된 것이다. 빈 결과라면 AuraDB에서 활성 모델을 확인한다.
 
 ```cypher
 MATCH (a:ActiveVersion)-[:POINTS_TO]->(m:Model)
@@ -51,7 +51,7 @@ RETURN a.tenant, a.model, a.version_id;
 
 현재 운영 서비스는 `https://text2sql-graph-mcp-production.up.railway.app/mcp`에 있다. Railway 프로젝트는 [text2sql-mcp](https://railway.com/project/4c122e3f-d265-4394-b891-30d89932c428)이다. `MCP_API_TOKEN`은 Railway 서비스 Variables에서 확인한다.
 
-코드를 바꾸면 GitHub Actions가 새 `latest` 이미지를 게시한다. Railway의 이미지 자동 업데이트는 현재 꺼져 있으므로 새 이미지가 게시된 뒤 서비스 Source의 업데이트를 직접 적용한다. 이미지 자동 업데이트를 활성화할 경우 `latest` 태그의 새 SHA를 Railway가 감지한 뒤 선택한 유지보수 시간에 재배포한다.
+코드를 바꾸면 GitHub Actions가 새 `latest` 이미지를 게시한다. Railway Source의 이미지 자동 업데이트는 `Update to the latest tag`와 `As soon as ready`로 설정했다. Railway가 새 SHA를 감지하면 운영 서비스에 배포한다. 감지는 레지스트리 확인 주기에 따라 몇 시간 늦어질 수 있다.
 
 ## 참고
 
