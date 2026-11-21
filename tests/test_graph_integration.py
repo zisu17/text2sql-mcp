@@ -34,6 +34,7 @@ class PublishedGraphTest(unittest.TestCase):
         self.assertTrue(models["models"])
         version = models["models"][0]["version_id"]
         calls = [self.repo.search_definitions("매출"), self.repo.get_dataset("order_lines"),
+                 self.repo.get_model_snapshot(),
                  self.repo.get_metric_lineage("order_lines", "revenue"),
                  self.repo.get_column_impact("olist", "main", "main", "orders", "order_id"),
                  self.repo.list_join_rules()]
@@ -41,8 +42,9 @@ class PublishedGraphTest(unittest.TestCase):
         self.assertEqual(calls[1]["source_kind"], "sql_query")
         self.assertEqual(calls[1]["tables_basis"], "field_lineage")
         self.assertGreater(len(calls[1]["tables"]), 1)
-        self.assertEqual(len(calls[4]["rules"]), 9)
-        self.assertIn("n_to_1", calls[4]["rules"][0])
+        self.assertTrue(calls[2]["definition"]["datasets"])
+        self.assertEqual(len(calls[5]["rules"]), 9)
+        self.assertIn("n_to_1", calls[5]["rules"][0])
 
 
 if __name__ == "__main__":

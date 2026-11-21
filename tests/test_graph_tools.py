@@ -13,12 +13,16 @@ from text2sql_mcp.server import mcp
 
 EXPECTED_TOOLS = {
     "graph_list_models", "graph_search_definitions", "graph_get_dataset",
-    "graph_get_metric_lineage", "graph_get_column_impact",
+    "graph_get_model_snapshot", "graph_get_metric_lineage", "graph_get_column_impact",
     "graph_list_join_rules",
 }
 
 
 class FakeRepository:
+    def get_model_snapshot(self, **kwargs):
+        return {"tenant": "olist", "model": "olist_sales", "version_id": "v1",
+                "definition": {"name": "olist_sales", "datasets": []}}
+
     def search_definitions(self, **kwargs):
         return {"tenant": "olist", "model": "olist_sales", "version_id": "v1",
                 "items": [{"kind": "Metric", "ref": "revenue"}], "has_more": False}
@@ -43,6 +47,9 @@ class MCPToolsTest(unittest.TestCase):
                     result = await client.call_tool("graph_search_definitions", {"query": "매출"})
                 self.assertFalse(result.is_error)
                 self.assertEqual(result.structured_content["items"][0]["ref"], "revenue")
+                with patch("text2sql_mcp.server.repository", return_value=FakeRepository()):
+                    snapshot = await client.call_tool("graph_get_model_snapshot", {})
+                self.assertEqual(snapshot.structured_content["version_id"], "v1")
         asyncio.run(run())
 
     def test_domain_error_is_tool_error(self):

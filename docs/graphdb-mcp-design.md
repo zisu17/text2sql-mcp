@@ -35,6 +35,7 @@ RETURN a.commit AS version, count(root) AS roots
 | graph_list_models | 없음 | 활성 모델과 version_id |
 | graph_search_definitions | query, 선택 kinds/model/limit | Dataset·Field·Metric 검색 |
 | graph_get_dataset | dataset, 선택 model | 필드·지표·소스·물리 테이블 |
+| graph_get_model_snapshot | 선택 model | 활성 버전의 실행용 시맨틱 모델 |
 | graph_get_metric_lineage | dataset, metric, 선택 model | 역할별 필드·값 계보·조인 영향 후보 |
 | graph_get_column_impact | 물리 컬럼 전체 키, 선택 model | 컬럼에서 활성 지표로 이어지는 영향 |
 | graph_list_join_rules | 선택 dataset/model | JOINS 관계의 이름·키·상태·n_to_1 |

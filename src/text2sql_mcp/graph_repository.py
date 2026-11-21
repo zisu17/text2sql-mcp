@@ -163,6 +163,93 @@ class GraphRepository:
                     "tables_basis": "field_lineage" if source_kind == "sql_query" else "direct"}
         return self._read(work)
 
+    def get_model_snapshot(self, model: str | None = None) -> dict:
+        """Return the active graph's executable semantic definition, in memory."""
+        def work(tx: Any) -> dict:
+            scope = self._scope(tx, model)
+            root = _one(_rows(tx, """
+                MATCH (m:Model {tenant:$tenant,model:$model,version:$version})
+                RETURN m.ref AS name, m.description AS description,
+                       m.ossie_version AS ossie_version, m.revision AS revision,
+                       m.instructions AS instructions
+            """, **scope), "model")
+            datasets = _rows(tx, """
+                MATCH (d:Dataset {tenant:$tenant,model:$model,version:$version})
+                RETURN d.ref AS name, d.source AS source,
+                       d.primary_key AS primary_key, d.unique_keys AS unique_keys,
+                       d.description AS description, d.instructions AS instructions
+                ORDER BY name
+            """, **scope)
+            if not datasets:
+                raise GraphError("SCHEMA_INCOMPATIBLE", "Active model has no datasets")
+            fields = _rows(tx, """
+                MATCH (f:Field {tenant:$tenant,model:$model,version:$version})
+                RETURN f.dataset AS dataset, f.name AS name, f.expression AS expression,
+                       f.datatype AS datatype, f.description AS description,
+                       f.instructions AS instructions
+                ORDER BY dataset,name
+            """, **scope)
+            metrics = _rows(tx, """
+                MATCH (m:Metric {tenant:$tenant,model:$model,version:$version})
+                RETURN m.dataset AS dataset, m.name AS name, m.expression AS expression,
+                       m.datatype AS datatype, m.description AS description,
+                       m.instructions AS instructions, m.status AS status
+                ORDER BY dataset,name
+            """, **scope)
+            joins = _rows(tx, """
+                MATCH (src:Dataset {tenant:$tenant,model:$model,version:$version})
+                      -[j:JOINS]->(dst:Dataset {tenant:$tenant,model:$model,version:$version})
+                RETURN j.name AS name, src.ref AS from_dataset, dst.ref AS to_dataset,
+                       j.from_columns AS from_columns, j.to_columns AS to_columns,
+                       j.status AS status
+                ORDER BY name,from_dataset,to_dataset
+            """, **scope)
+            by_name = {}
+            for item in datasets:
+                ds = {"name": item["name"], "source": item["source"],
+                      "primary_key": item["primary_key"] or [],
+                      "unique_keys": [key.split(",") for key in item["unique_keys"] or []],
+                      "description": item["description"] or "", "fields": [], "metrics": []}
+                if item["instructions"]:
+                    ds["ai_context"] = {"instructions": item["instructions"]}
+                by_name[ds["name"]] = ds
+            for item in fields:
+                if item["dataset"] not in by_name:
+                    raise GraphError("SCHEMA_INCOMPATIBLE", "Field has no dataset")
+                field = {"name": item["name"], "expression": {"sql": item["expression"]},
+                         "datatype": item["datatype"], "description": item["description"] or ""}
+                if item["instructions"]:
+                    field["ai_context"] = {"instructions": item["instructions"]}
+                by_name[item["dataset"]]["fields"].append(field)
+            top_metrics = []
+            for item in metrics:
+                metric = {"name": item["name"], "expression": {"sql": item["expression"]},
+                          "datatype": item["datatype"], "description": item["description"] or "",
+                          "nonportable_extensions": [{"vendor_name": "TEXT2SQL",
+                                                      "data": {"status": item["status"]}}]}
+                if item["instructions"]:
+                    metric["ai_context"] = {"instructions": item["instructions"]}
+                if item["dataset"]:
+                    if item["dataset"] not in by_name:
+                        raise GraphError("SCHEMA_INCOMPATIBLE", "Metric has no dataset")
+                    by_name[item["dataset"]]["metrics"].append(metric)
+                else:
+                    top_metrics.append(metric)
+            relationships = [{"name": j["name"], "from": j["from_dataset"], "to": j["to_dataset"],
+                              "from_columns": j["from_columns"], "to_columns": j["to_columns"],
+                              "nonportable_extensions": [{"vendor_name": "TEXT2SQL",
+                                                          "data": {"status": j["status"]}}]}
+                             for j in joins]
+            definition = {"version": root["ossie_version"], "name": root["name"],
+                          "description": root["description"] or "", "datasets": list(by_name.values()),
+                          "metrics": top_metrics, "relationships": relationships,
+                          "nonportable_extensions": [{"vendor_name": "TEXT2SQL",
+                                                      "data": {"revision": root["revision"] or 0}}]}
+            if root["instructions"]:
+                definition["ai_context"] = {"instructions": root["instructions"]}
+            return {**self._metadata(scope), "definition": definition}
+        return self._read(work)
+
     def get_metric_lineage(self, dataset: str, metric: str,
                            model: str | None = None) -> dict:
         def work(tx: Any) -> dict:

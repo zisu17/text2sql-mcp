@@ -30,6 +30,7 @@ Railway에서는 `Dockerfile`로 HTTP 앱을 실행하고 Neo4j AuraDB에 TLS로
 | `graph_list_models` | 활성 모델 목록 |
 | `graph_search_definitions` | 데이터셋·필드·지표 검색 |
 | `graph_get_dataset` | 데이터셋의 필드·지표·물리 소스 후보 |
+| `graph_get_model_snapshot` | 활성 그래프의 실행용 시맨틱 모델. 파일 없이 SQL을 생성하는 클라이언트용 |
 | `graph_get_metric_lineage` | 지표의 값 출처와 행 집합 의존성 |
 | `graph_get_column_impact` | 물리 컬럼 변경 영향 후보 |
 | `graph_list_join_rules` | 선언된 조인 규칙과 상태 |
