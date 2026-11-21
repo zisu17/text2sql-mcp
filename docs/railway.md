@@ -8,7 +8,7 @@ Railway의 Docker 서비스가 `text2sql_mcp.http_app:app`을 Streamable HTTP로
 
 ## Railway 설정
 
-1. `main`에 코드를 푸시하면 GitHub Actions가 루트 `Dockerfile`로 `ghcr.io/zisu17/text2sql-mcp:latest` 이미지를 게시한다. 최초 게시 후 패키지 공개 범위를 `Public`으로 설정한다.
+1. `main`에 코드를 푸시하면 GitHub Actions가 루트 `Dockerfile`로 `ghcr.io/zisu17/text2sql-mcp:latest` 이미지를 게시한다. 최초 게시 후 패키지 공개 범위가 `Public`인지 확인한다.
 2. Railway에서 프로젝트를 만들고 서비스 소스에 공개 이미지를 지정한다.
 3. 서비스의 Networking에서 공개 도메인을 생성한다. Docker 앱은 `0.0.0.0`의 Railway `PORT`로 듣는다.
 4. 아래 변수를 서비스에 설정한다. 저장소나 Docker 이미지에 비밀번호를 넣지 않는다.
@@ -49,8 +49,13 @@ RETURN a.tenant, a.model, a.version_id;
 
 정의 변경은 `semantic-definitions`가 AuraDB에 게시하면 다음 MCP 조회부터 반영된다. MCP 코드를 바꾼 경우에만 Railway 서비스를 다시 배포한다.
 
+현재 운영 서비스는 `https://text2sql-graph-mcp-production.up.railway.app/mcp`에 있다. Railway 프로젝트는 [text2sql-mcp](https://railway.com/project/4c122e3f-d265-4394-b891-30d89932c428)이다. `MCP_API_TOKEN`은 Railway 서비스 Variables에서 확인한다.
+
+코드를 바꾸면 GitHub Actions가 새 `latest` 이미지를 게시한다. Railway의 이미지 자동 업데이트는 현재 꺼져 있으므로 새 이미지가 게시된 뒤 서비스 Source의 업데이트를 직접 적용한다. 이미지 자동 업데이트를 활성화할 경우 `latest` 태그의 새 SHA를 Railway가 감지한 뒤 선택한 유지보수 시간에 재배포한다.
+
 ## 참고
 
 - [Railway Docker 서비스](https://docs.railway.com/services)
 - [Railway 자동 환경변수](https://docs.railway.com/variables/reference)
+- [Railway 이미지 자동 업데이트](https://docs.railway.com/deployments/image-auto-updates)
 - [MCP Python SDK의 Host 허용 목록](https://github.com/modelcontextprotocol/python-sdk/blob/main/docs/run/deploy.md)
