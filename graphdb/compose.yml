@@ -1,0 +1,17 @@
+name: text2sql-graphdb
+
+services:
+  neo4j:
+    image: public.ecr.aws/docker/library/neo4j:2026.10.2
+    container_name: text2sql-neo4j
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    volumes:
+      - graph_data:/data
+
+volumes:
+  graph_data:
