@@ -8,10 +8,11 @@ Railway의 Docker 서비스가 `text2sql_mcp.http_app:app`을 Streamable HTTP로
 
 ## Railway 설정
 
-1. Railway에서 새 프로젝트를 만들고 저장소 코드를 서비스에 배포한다. GitHub 소스 연결 또는 `railway up`을 사용할 수 있다. 루트 `Dockerfile`을 빌드 방식으로 사용한다.
-2. 서비스의 Networking에서 공개 도메인을 생성한다. Docker 앱은 `0.0.0.0`의 Railway `PORT`로 듣는다.
-3. 아래 변수를 서비스에 설정한다. 저장소나 Docker 이미지에 비밀번호를 넣지 않는다.
-4. Healthcheck 경로를 `/healthz`로 지정한 뒤 배포한다.
+1. `main`에 코드를 푸시하면 GitHub Actions가 루트 `Dockerfile`로 `ghcr.io/zisu17/text2sql-mcp:latest` 이미지를 게시한다. 최초 게시 후 패키지 공개 범위를 `Public`으로 설정한다.
+2. Railway에서 프로젝트를 만들고 서비스 소스에 공개 이미지를 지정한다.
+3. 서비스의 Networking에서 공개 도메인을 생성한다. Docker 앱은 `0.0.0.0`의 Railway `PORT`로 듣는다.
+4. 아래 변수를 서비스에 설정한다. 저장소나 Docker 이미지에 비밀번호를 넣지 않는다.
+5. Healthcheck 경로를 `/healthz`로 지정한 뒤 배포한다.
 
 | 변수 | 값 |
 |---|---|
