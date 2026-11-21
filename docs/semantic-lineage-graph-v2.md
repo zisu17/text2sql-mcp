@@ -2,6 +2,8 @@
 
 작성 기준: 2026-11-21. 이 문서는 `semantic-definitions/definitions/olist/`의 Ossie 0.3 정의를 기준으로 한 설계안이다. 그래프 적재 코드 변경이나 Neo4j 재적재 결과를 뜻하지 않는다.
 
+> 이 설계안은 현재 Aura 게시 스키마와 다르다. 현재 MCP 조회 계약은 [graphdb-mcp-design.md](graphdb-mcp-design.md)를 따른다.
+
 ## 1. 목적과 범위
 
 그래프는 승인된 시맨틱 정의와 실제 DB 카탈로그의 **조회용 투영**이다. 정의의 정본은 `sales.ossie.yaml`, `sales.ontology.yaml`, `sales.mapping.yaml`이다. 지표 계산과 승인 판정은 정의 및 Text2SQL 엔진이 수행한다. 그래프는 정의 탐색, 물리 컬럼 계보, 변경 영향 조회를 맡는다.

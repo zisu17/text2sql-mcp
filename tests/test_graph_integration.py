@@ -17,7 +17,7 @@ class PublishedGraphTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.repo.close()
 
-    def test_value_and_row_set_lineage_are_distinct(self):
+    def test_value_and_join_lineage_are_distinct(self):
         result = self.repo.get_metric_lineage("order_lines", "revenue")
         fields = {item["ref"]: item for item in result["fields"]}
         self.assertIn({"source_id": "olist", "catalog": "main", "schema": "main",
@@ -29,18 +29,20 @@ class PublishedGraphTest(unittest.TestCase):
         impact = self.repo.get_column_impact("olist", "main", "main", "orders", "order_id")
         self.assertIn("row_set_candidate", {item["impact"] for item in impact["impacts"]})
 
-    def test_all_seven_queries_and_active_version(self):
+    def test_all_six_queries_and_active_version(self):
         models = self.repo.list_models()
         self.assertTrue(models["models"])
         version = models["models"][0]["version_id"]
         calls = [self.repo.search_definitions("매출"), self.repo.get_dataset("order_lines"),
                  self.repo.get_metric_lineage("order_lines", "revenue"),
                  self.repo.get_column_impact("olist", "main", "main", "orders", "order_id"),
-                 self.repo.list_join_rules(), self.repo.get_concept_mapping("AmountBRL")]
+                 self.repo.list_join_rules()]
         self.assertTrue(all(item["version_id"] == version for item in calls))
         self.assertEqual(calls[1]["source_kind"], "sql_query")
+        self.assertEqual(calls[1]["tables_basis"], "field_lineage")
         self.assertGreater(len(calls[1]["tables"]), 1)
         self.assertEqual(len(calls[4]["rules"]), 9)
+        self.assertIn("n_to_1", calls[4]["rules"][0])
 
 
 if __name__ == "__main__":

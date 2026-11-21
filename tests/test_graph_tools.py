@@ -7,13 +7,14 @@ from unittest.mock import patch
 from mcp import Client
 
 from text2sql_mcp.contracts import GraphError
+from text2sql_mcp.graph_repository import GraphRepository
 from text2sql_mcp.server import mcp
 
 
 EXPECTED_TOOLS = {
     "graph_list_models", "graph_search_definitions", "graph_get_dataset",
     "graph_get_metric_lineage", "graph_get_column_impact",
-    "graph_list_join_rules", "graph_get_concept_mapping",
+    "graph_list_join_rules",
 }
 
 
@@ -27,6 +28,10 @@ class FakeRepository:
 
 
 class MCPToolsTest(unittest.TestCase):
+    def test_retired_concept_kind_is_rejected(self):
+        with self.assertRaisesRegex(GraphError, "Invalid kinds"):
+            GraphRepository.search_definitions(None, "amount", kinds=["Concept"])
+
     def test_tools_list_and_structured_result(self):
         async def run():
             async with Client(mcp) as client:

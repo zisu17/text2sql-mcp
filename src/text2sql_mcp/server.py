@@ -46,7 +46,7 @@ def graph_list_models() -> dict[str, Any]:
 @mcp.tool(structured_output=True)
 def graph_search_definitions(query: str, kinds: list[str] | None = None,
                              model: str | None = None, limit: int = 20) -> dict[str, Any]:
-    """Search active datasets, fields, metrics, and concepts by text."""
+    """Search active datasets, fields, and metrics by text."""
     return _call(repository().search_definitions, query=query, kinds=kinds, model=model, limit=limit)
 
 
@@ -73,14 +73,8 @@ def graph_get_column_impact(source_id: str, catalog: str, schema: str,
 
 @mcp.tool(structured_output=True)
 def graph_list_join_rules(dataset: str | None = None, model: str | None = None) -> dict[str, Any]:
-    """List declared join rules and their approval and verification states."""
+    """List declared dataset joins and their status and cardinality claim."""
     return _call(repository().list_join_rules, dataset=dataset, model=model)
-
-
-@mcp.tool(structured_output=True)
-def graph_get_concept_mapping(concept: str, model: str | None = None) -> dict[str, Any]:
-    """Get fields explicitly mapped to an ontology concept."""
-    return _call(repository().get_concept_mapping, concept=concept, model=model)
 
 
 def main() -> None:

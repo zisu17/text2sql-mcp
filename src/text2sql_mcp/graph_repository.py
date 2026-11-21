@@ -1,4 +1,4 @@
-"""Fixed, parameterized Cypher for the active semantic graph."""
+"""Fixed Cypher reads of the active semantic lineage graph."""
 
 from __future__ import annotations
 
@@ -12,15 +12,8 @@ from .config import Config
 from .contracts import GraphError, column_key
 
 
-ACTIVE = """
-MATCH (a:ActiveVersion {tenant:$tenant, model:$model})
-OPTIONAL MATCH (a)-[:POINTS_TO]->(root:Model {tenant:$tenant, model:$model})
-RETURN a.version_id AS version_id, collect(root.version_id) AS targets
-"""
-
-
-def _rows(tx: Any, cypher: str, **parameters: Any) -> list[dict]:
-    return [record.data() for record in tx.run(cypher, parameters)]
+def _rows(tx: Any, cypher: str, **params: Any) -> list[dict]:
+    return [record.data() for record in tx.run(cypher, params)]
 
 
 def _one(rows: list[dict], kind: str) -> dict:
@@ -52,32 +45,49 @@ class GraphRepository:
 
     def _scope(self, tx: Any, model: str | None) -> dict:
         scope = {"tenant": self.config.tenant, "model": model or self.config.default_model}
-        rows = _rows(tx, ACTIVE, **scope)
+        rows = _rows(tx, """
+            MATCH (a:ActiveVersion {tenant:$tenant, model:$model})
+            OPTIONAL MATCH (root:Model {tenant:$tenant, model:$model})
+            WHERE root.version = a.commit
+            RETURN a.commit AS version, count(root) AS roots
+        """, **scope)
         if not rows:
             raise GraphError("NO_ACTIVE_VERSION", "No active graph for this model")
-        version = rows[0]["version_id"]
-        if not version or rows[0]["targets"] != [version]:
-            raise GraphError("SCHEMA_INCOMPATIBLE", "ActiveVersion pointer is missing or inconsistent")
-        scope["version_id"] = version
+        if not rows[0]["version"] or rows[0]["roots"] != 1:
+            raise GraphError("SCHEMA_INCOMPATIBLE", "ActiveVersion commit has no unique Model")
+        scope["version"] = rows[0]["version"]
         return scope
+
+    @staticmethod
+    def _metadata(scope: dict) -> dict:
+        # Preserve the MCP response key while reading the writer's version/commit.
+        return {"tenant": scope["tenant"], "model": scope["model"],
+                "version_id": scope["version"]}
 
     def list_models(self) -> dict:
         def work(tx: Any) -> dict:
             rows = _rows(tx, """
-                MATCH (a:ActiveVersion {tenant:$tenant})-[:POINTS_TO]->(m:Model)
-                WHERE a.version_id = m.version_id AND a.model = m.model AND a.tenant = m.tenant
-                RETURN a.model AS model, a.version_id AS version_id,
-                       m.name AS name, m.description AS description
+                MATCH (a:ActiveVersion {tenant:$tenant})
+                OPTIONAL MATCH (m:Model {tenant:$tenant})
+                WHERE m.model = a.model AND m.version = a.commit
+                RETURN a.model AS model, a.commit AS version_id,
+                       head(collect(m.name)) AS name,
+                       head(collect(m.description)) AS description,
+                       count(m) AS roots
                 ORDER BY model LIMIT 51
             """, tenant=self.config.tenant)
-            return {"tenant": self.config.tenant, "models": rows[:50], "has_more": len(rows) > 50}
+            if any(not row["version_id"] or row["roots"] != 1 for row in rows):
+                raise GraphError("SCHEMA_INCOMPATIBLE", "ActiveVersion commit has no unique Model")
+            models = [{k: v for k, v in row.items() if k != "roots"} for row in rows[:50]]
+            return {"tenant": self.config.tenant, "models": models,
+                    "has_more": len(rows) > 50}
         return self._read(work)
 
     def search_definitions(self, query: str, kinds: list[str] | None = None,
                            model: str | None = None, limit: int = 20) -> dict:
         if not query.strip():
             raise GraphError("INVALID_INPUT", "query must not be empty")
-        allowed = {"Dataset", "Field", "Metric", "Concept"}
+        allowed = {"Dataset", "Field", "Metric"}
         selected = kinds or sorted(allowed)
         if set(selected) - allowed or not 1 <= limit <= 50:
             raise GraphError("INVALID_INPUT", "Invalid kinds or limit (1..50)")
@@ -85,7 +95,7 @@ class GraphRepository:
         def work(tx: Any) -> dict:
             scope = self._scope(tx, model)
             rows = _rows(tx, """
-                MATCH (n:Definition {tenant:$tenant, model:$model, version_id:$version_id})
+                MATCH (n:Definition {tenant:$tenant,model:$model,version:$version})
                 WHERE any(kind IN labels(n) WHERE kind IN $kinds)
                   AND (toLower(coalesce(n.ref,'')) CONTAINS $query
                        OR toLower(coalesce(n.name,'')) CONTAINS $query
@@ -94,12 +104,12 @@ class GraphRepository:
                 RETURN n.id AS id, n.ref AS ref, n.name AS name,
                        n.description AS description, n.synonyms AS synonyms,
                        n.status AS status, labels(n) AS labels
-                ORDER BY ref, id LIMIT $take
+                ORDER BY ref,id LIMIT $take
             """, **scope, kinds=selected, query=query.strip().lower(), take=limit + 1)
             items = [{**{k: v for k, v in row.items() if k != "labels"},
                       "kind": next(kind for kind in selected if kind in row["labels"])}
                      for row in rows[:limit]]
-            return {**scope, "items": items, "has_more": len(rows) > limit}
+            return {**self._metadata(scope), "items": items, "has_more": len(rows) > limit}
         return self._read(work)
 
     def get_dataset(self, dataset: str, model: str | None = None) -> dict:
@@ -107,41 +117,50 @@ class GraphRepository:
             scope = self._scope(tx, model)
             p = {**scope, "dataset": dataset}
             ds = _one(_rows(tx, """
-                MATCH (d:Dataset {tenant:$tenant,model:$model,version_id:$version_id,ref:$dataset})
+                MATCH (d:Dataset {tenant:$tenant,model:$model,version:$version,ref:$dataset})
                 RETURN d.id AS id, d.ref AS ref, d.name AS name,
-                       d.description AS description, d.primary_key AS primary_key
+                       d.description AS description, d.primary_key AS primary_key,
+                       d.source AS source
             """, **p), "dataset")
             fields = _rows(tx, """
-                MATCH (d:Dataset {tenant:$tenant,model:$model,version_id:$version_id,ref:$dataset})
-                      -[:HAS]->(f:Field {tenant:$tenant,model:$model,version_id:$version_id})
+                MATCH (d:Dataset {tenant:$tenant,model:$model,version:$version,ref:$dataset})
+                      -[:HAS]->(f:Field {tenant:$tenant,model:$model,version:$version})
                 RETURN f.id AS id, f.ref AS ref, f.name AS name, f.description AS description,
                        f.datatype AS datatype, f.expression AS expression ORDER BY f.ref
             """, **p)
             metrics = _rows(tx, """
-                MATCH (d:Dataset {tenant:$tenant,model:$model,version_id:$version_id,ref:$dataset})
-                      -[:HAS]->(m:Metric {tenant:$tenant,model:$model,version_id:$version_id})
+                MATCH (d:Dataset {tenant:$tenant,model:$model,version:$version,ref:$dataset})
+                      -[:HAS]->(m:Metric {tenant:$tenant,model:$model,version:$version})
                 RETURN m.id AS id, m.ref AS ref, m.name AS name,
                        m.description AS description, m.status AS status ORDER BY m.ref
             """, **p)
-            sources = _rows(tx, """
-                MATCH (d:Dataset {tenant:$tenant,model:$model,version_id:$version_id,ref:$dataset})
-                OPTIONAL MATCH (d)-[:HAS_SOURCE_QUERY]->(q:SourceQuery {tenant:$tenant,model:$model,version_id:$version_id})
-                RETURN q.sql AS sql, q.id AS query_id
-            """, **p)
-            source = _one(sources, "dataset source")
-            tables = _rows(tx, """
-                MATCH (d:Dataset {tenant:$tenant,model:$model,version_id:$version_id,ref:$dataset})
-                OPTIONAL MATCH (d)-[:HAS_SOURCE_QUERY]->(q:SourceQuery {tenant:$tenant,model:$model,version_id:$version_id})
-                WITH d, q
-                MATCH (reader)-[:READS_FROM]->(t:Table {tenant:$tenant})
-                WHERE reader = d OR reader = q
-                RETURN DISTINCT t.source_id AS source_id, t.catalog AS catalog,
-                       t.schema AS schema, t.name AS table, t.kind AS kind
-                ORDER BY source_id, catalog, schema, table
-            """, **p)
-            return {**scope, "dataset": ds, "fields": fields, "metrics": metrics,
-                    "source_kind": "sql_query" if source["query_id"] else "table",
-                    "source_sql": source["sql"], "tables": tables}
+            source_kind = "sql_query" if ds["source"].lstrip().upper().startswith("SELECT") else "table"
+            if source_kind == "table":
+                tables = _rows(tx, """
+                    MATCH (d:Dataset {tenant:$tenant,model:$model,version:$version,ref:$dataset})
+                          -[:DERIVED_FROM]->(t:Table {tenant:$tenant})
+                    RETURN DISTINCT t.source_id AS source_id, t.catalog AS catalog,
+                           t.schema AS schema, t.name AS table, t.kind AS kind
+                    ORDER BY source_id,catalog,schema,table
+                """, **p)
+            else:
+                # SQL-source datasets have no Dataset->Table edge in the writer.
+                tables = _rows(tx, """
+                    MATCH (d:Dataset {tenant:$tenant,model:$model,version:$version,ref:$dataset})
+                          -[:HAS]->(f:Field {tenant:$tenant,model:$model,version:$version})
+                          -[:DERIVED_FROM]->(c:Column {tenant:$tenant})
+                    MATCH (t:Table {tenant:$tenant})
+                    WHERE t.source_id=c.source_id AND t.catalog=c.catalog
+                      AND t.schema=c.schema AND t.name=c.table
+                    RETURN DISTINCT t.source_id AS source_id, t.catalog AS catalog,
+                           t.schema AS schema, t.name AS table, t.kind AS kind
+                    ORDER BY source_id,catalog,schema,table
+                """, **p)
+            return {**self._metadata(scope), "dataset": {k: v for k, v in ds.items() if k != "source"},
+                    "fields": fields, "metrics": metrics, "source_kind": source_kind,
+                    "source_sql": ds["source"] if source_kind == "sql_query" else None,
+                    "tables": tables,
+                    "tables_basis": "field_lineage" if source_kind == "sql_query" else "direct"}
         return self._read(work)
 
     def get_metric_lineage(self, dataset: str, metric: str,
@@ -150,42 +169,38 @@ class GraphRepository:
             scope = self._scope(tx, model)
             p = {**scope, "dataset": dataset, "metric": metric}
             m = _one(_rows(tx, """
-                MATCH (d:Dataset {tenant:$tenant,model:$model,version_id:$version_id,ref:$dataset})
-                      -[:HAS]->(m:Metric {tenant:$tenant,model:$model,version_id:$version_id,ref:$metric})
+                MATCH (d:Dataset {tenant:$tenant,model:$model,version:$version,ref:$dataset})
+                      -[:HAS]->(m:Metric {tenant:$tenant,model:$model,version:$version,ref:$metric})
                 RETURN m.id AS id, m.ref AS ref, m.dataset AS dataset,
                        m.name AS name, m.description AS description,
                        m.expression AS expression, m.status AS status
             """, **p), "metric")
-            field_rows = _rows(tx, """
-                MATCH (d:Dataset {tenant:$tenant,model:$model,version_id:$version_id,ref:$dataset})
-                      -[:HAS]->(m:Metric {tenant:$tenant,model:$model,version_id:$version_id,ref:$metric})
-                      -[u:USES_FIELD]->(f:Field {tenant:$tenant,model:$model,version_id:$version_id})
-                OPTIONAL MATCH (f)-[:VALUE_DERIVED_FROM]->(c:Column {tenant:$tenant})
-                RETURN f.id AS id, f.ref AS ref, u.roles AS roles,
+            rows = _rows(tx, """
+                MATCH (m:Metric {tenant:$tenant,model:$model,version:$version,id:$metric_id})
+                      -[r:DERIVED_FROM]->(f:Field {tenant:$tenant,model:$model,version:$version})
+                OPTIONAL MATCH (f)-[:DERIVED_FROM]->(c:Column {tenant:$tenant})
+                RETURN f.id AS id, f.ref AS ref, r.role AS role,
                        c.source_id AS source_id, c.catalog AS catalog,
                        c.schema AS schema, c.table AS table, c.name AS column
-                ORDER BY ref, source_id, catalog, schema, table, column
-            """, **p)
+                ORDER BY ref,source_id,catalog,schema,table,column
+            """, **scope, metric_id=m["id"])
             fields: dict[str, dict] = {}
-            for row in field_rows:
+            row_set: list[dict] = []
+            for row in rows:
+                role = row["role"] or "unknown"
                 item = fields.setdefault(row["id"], {"id": row["id"], "ref": row["ref"],
-                                                     "roles": row["roles"] or [], "value_columns": []})
-                if row["column"] is not None:
-                    key = column_key(row)
-                    if key not in item["value_columns"]:
-                        item["value_columns"].append(key)
-            row_set = _rows(tx, """
-                MATCH (d:Dataset {tenant:$tenant,model:$model,version_id:$version_id,ref:$dataset})
-                      -[:HAS]->(:Metric {tenant:$tenant,model:$model,version_id:$version_id,ref:$metric})
-                MATCH (d)-[:HAS_SOURCE_QUERY]->(q:SourceQuery {tenant:$tenant,model:$model,version_id:$version_id})
-                      -[r:ROW_DEPENDS_ON]->(c:Column {tenant:$tenant})
-                RETURN c.source_id AS source_id, c.catalog AS catalog,
-                       c.schema AS schema, c.table AS table, c.name AS column,
-                       r.roles AS roles ORDER BY source_id,catalog,schema,table,column
-            """, **p)
-            return {**scope, "metric": m, "fields": list(fields.values()),
-                    "row_set_candidates": [{"column": column_key(row), "roles": row["roles"] or []}
-                                           for row in row_set]}
+                                                     "roles": [role], "value_columns": []})
+                if row["column"] is None:
+                    continue
+                key = column_key(row)
+                if role == "join":
+                    candidate = {"column": key, "roles": [role]}
+                    if candidate not in row_set:
+                        row_set.append(candidate)
+                elif key not in item["value_columns"]:
+                    item["value_columns"].append(key)
+            return {**self._metadata(scope), "metric": m, "fields": list(fields.values()),
+                    "row_set_candidates": row_set}
         return self._read(work)
 
     def get_column_impact(self, source_id: str, catalog: str, schema: str,
@@ -199,27 +214,22 @@ class GraphRepository:
                                  schema:$schema,table:$table,name:$column})
                 RETURN c.name AS name
             """, **p), "column")
-            value = _rows(tx, """
-                MATCH (d:Dataset {tenant:$tenant,model:$model,version_id:$version_id})
-                      -[:HAS]->(m:Metric {tenant:$tenant,model:$model,version_id:$version_id})
-                      -[u:USES_FIELD]->(f:Field {tenant:$tenant,model:$model,version_id:$version_id})
-                      -[:VALUE_DERIVED_FROM]->(c:Column {tenant:$tenant,source_id:$source_id,
+            rows = _rows(tx, """
+                MATCH (m:Metric {tenant:$tenant,model:$model,version:$version})
+                      -[r:DERIVED_FROM]->(f:Field {tenant:$tenant,model:$model,version:$version})
+                      -[:DERIVED_FROM]->(c:Column {tenant:$tenant,source_id:$source_id,
                           catalog:$catalog,schema:$schema,table:$table,name:$column})
-                RETURN d.ref AS dataset, m.ref AS metric, m.status AS status,
-                       f.ref AS field, u.roles AS roles ORDER BY dataset,metric,field
+                RETURN m.dataset AS dataset, m.ref AS metric, m.status AS status,
+                       f.ref AS field, r.role AS role
+                ORDER BY dataset,metric,field
             """, **p)
-            row_set = _rows(tx, """
-                MATCH (d:Dataset {tenant:$tenant,model:$model,version_id:$version_id})
-                      -[:HAS]->(m:Metric {tenant:$tenant,model:$model,version_id:$version_id})
-                MATCH (d)-[:HAS_SOURCE_QUERY]->(q:SourceQuery {tenant:$tenant,model:$model,version_id:$version_id})
-                      -[r:ROW_DEPENDS_ON]->(c:Column {tenant:$tenant,source_id:$source_id,
-                          catalog:$catalog,schema:$schema,table:$table,name:$column})
-                RETURN d.ref AS dataset, m.ref AS metric, m.status AS status,
-                       r.roles AS roles ORDER BY dataset,metric
-            """, **p)
-            impacts = [{**row, "impact": "value"} for row in value]
-            impacts += [{**row, "impact": "row_set_candidate"} for row in row_set]
-            return {**scope, "column": {k: p[k] for k in ("source_id", "catalog", "schema", "table", "column")},
+            impacts = [{"dataset": row["dataset"], "metric": row["metric"],
+                        "status": row["status"], "field": row["field"],
+                        "roles": [row["role"] or "unknown"],
+                        "impact": "row_set_candidate" if row["role"] == "join" else "value"}
+                       for row in rows]
+            return {**self._metadata(scope),
+                    "column": {k: p[k] for k in ("source_id", "catalog", "schema", "table", "column")},
                     "impacts": impacts}
         return self._read(work)
 
@@ -228,45 +238,14 @@ class GraphRepository:
         def work(tx: Any) -> dict:
             scope = self._scope(tx, model)
             rows = _rows(tx, """
-                MATCH (root:Model {tenant:$tenant,model:$model,version_id:$version_id})
-                      -[:HAS_JOIN_RULE]->(j:JoinRule {tenant:$tenant,model:$model,version_id:$version_id})
-                      -[:FROM_DATASET]->(src:Dataset {tenant:$tenant,model:$model,version_id:$version_id})
-                MATCH (j)-[:TO_DATASET]->(dst:Dataset {tenant:$tenant,model:$model,version_id:$version_id})
+                MATCH (src:Dataset {tenant:$tenant,model:$model,version:$version})
+                      -[j:JOINS]->(dst:Dataset {tenant:$tenant,model:$model,version:$version})
                 WHERE $dataset IS NULL OR src.ref=$dataset OR dst.ref=$dataset
-                RETURN j.id AS id, j.ref AS ref, j.name AS name, j.description AS description,
-                       j.status AS status, j.from_columns AS from_columns,
-                       j.to_columns AS to_columns, j.declared_n_to_1 AS declared_n_to_1,
-                       j.data_verified AS data_verified,
-                       src.ref AS from_dataset, dst.ref AS to_dataset ORDER BY ref
+                RETURN j.name AS name, j.status AS status,
+                       j.from_columns AS from_columns, j.to_columns AS to_columns,
+                       j.n_to_1 AS n_to_1,
+                       src.ref AS from_dataset, dst.ref AS to_dataset
+                ORDER BY name,from_dataset,to_dataset
             """, **scope, dataset=dataset)
-            return {**scope, "rules": rows}
-        return self._read(work)
-
-    def get_concept_mapping(self, concept: str, model: str | None = None) -> dict:
-        def work(tx: Any) -> dict:
-            scope = self._scope(tx, model)
-            p = {**scope, "concept": concept}
-            item = _one(_rows(tx, """
-                MATCH (c:Concept {tenant:$tenant,model:$model,version_id:$version_id,ref:$concept})
-                RETURN c.id AS id, c.ref AS ref, c.description AS description,
-                       c.concept_type AS concept_type
-            """, **p), "concept")
-            rows = _rows(tx, """
-                MATCH (concept:Concept {tenant:$tenant,model:$model,version_id:$version_id,ref:$concept})
-                      -[:MAPS_TO]->(f:Field {tenant:$tenant,model:$model,version_id:$version_id})
-                OPTIONAL MATCH (f)-[:VALUE_DERIVED_FROM]->(c:Column {tenant:$tenant})
-                RETURN f.id AS id, f.ref AS ref, c.source_id AS source_id,
-                       c.catalog AS catalog, c.schema AS schema,
-                       c.table AS table, c.name AS column
-                ORDER BY ref,source_id,catalog,schema,table,column
-            """, **p)
-            fields: dict[str, dict] = {}
-            for row in rows:
-                field = fields.setdefault(row["id"], {"id": row["id"], "ref": row["ref"],
-                                                     "value_columns": []})
-                if row["column"] is not None:
-                    key = column_key(row)
-                    if key not in field["value_columns"]:
-                        field["value_columns"].append(key)
-            return {**scope, "concept": item, "fields": list(fields.values())}
+            return {**self._metadata(scope), "rules": rows}
         return self._read(work)

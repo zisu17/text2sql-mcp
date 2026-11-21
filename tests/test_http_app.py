@@ -58,7 +58,7 @@ class HTTPAppTest(unittest.TestCase):
             listed = client.post("/mcp", json={"jsonrpc": "2.0", "id": 2,
                                                "method": "tools/list"}, headers=mcp_headers)
             self.assertEqual(listed.status_code, 200)
-            self.assertEqual(len(listed.json()["result"]["tools"]), 7)
+            self.assertEqual(len(listed.json()["result"]["tools"]), 6)
 
 
 if __name__ == "__main__":

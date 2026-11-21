@@ -43,8 +43,9 @@ curl -i https://<공개 도메인>/mcp
 첫 요청은 `200 OK`와 `ok`를 반환하고 두 번째 요청은 `401 Unauthorized`를 반환해야 한다. 클라이언트의 MCP 서버 설정에서 `Authorization: Bearer <MCP_API_TOKEN 값>` 헤더를 지정한다. `graph_list_models()`가 `olist_sales`를 반환하면 AuraDB까지 연결된 것이다. 빈 결과라면 AuraDB에서 활성 모델을 확인한다.
 
 ```cypher
-MATCH (a:ActiveVersion)-[:POINTS_TO]->(m:Model)
-RETURN a.tenant, a.model, a.version_id;
+MATCH (a:ActiveVersion), (m:Model)
+WHERE a.tenant = m.tenant AND a.model = m.model AND a.commit = m.version
+RETURN a.tenant, a.model, a.commit;
 ```
 
 정의 변경은 `semantic-definitions`가 AuraDB에 게시하면 다음 MCP 조회부터 반영된다. MCP 코드를 바꾼 경우에만 Railway 서비스를 다시 배포한다.
