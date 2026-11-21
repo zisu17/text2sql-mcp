@@ -756,12 +756,16 @@ source = { editable = "." }
 dependencies = [
     { name = "mcp" },
     { name = "neo4j" },
+    { name = "starlette" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "mcp", specifier = ">=2,<3" },
     { name = "neo4j", specifier = ">=6,<7" },
+    { name = "starlette", specifier = ">=1,<2" },
+    { name = "uvicorn", specifier = ">=0.30,<1" },
 ]
 
 [[package]]

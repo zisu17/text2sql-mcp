@@ -107,7 +107,7 @@ text2sql-mcp/
 └── graphdb/                 # 기존 로컬 인프라·최초 설계 재현 코드
 ```
 
-Python MCP SDK 2.x의 `MCPServer`로 도구를 등록하고 첫 전송 방식은 로컬 `stdio`로 한다. 서버 시작 전에 표준 출력에 로그를 쓰지 않는다. 오류·운영 로그는 표준 오류로 보낸다. 원격 클라이언트가 필요한 시점에만 Streamable HTTP를 검토한다.
+Python MCP SDK 2.x의 `MCPServer`로 도구를 등록한다. 로컬 `stdio` 진입점은 유지하고 원격 배포에는 [인증된 Streamable HTTP 앱](railway.md)을 별도로 사용한다. stdio 서버 시작 전에 표준 출력에 로그를 쓰지 않는다. 오류·운영 로그는 표준 오류로 보낸다.
 
 | 환경변수 | 용도 |
 |---|---|

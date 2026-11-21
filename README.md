@@ -1,6 +1,6 @@
 # Text2SQL Graph MCP
 
-Neo4j에 게시된 시맨틱 정의와 물리 계보를 조회하는 로컬 MCP 서버입니다. 정의 검증과 그래프 적재는 [semantic-definitions](https://github.com/zisu17/semantic-definitions)가 담당합니다. 이 서버의 도구는 그래프를 수정하거나 원본 DB에 접속하지 않습니다.
+Neo4j에 게시된 시맨틱 정의와 물리 계보를 조회하는 MCP 서버입니다. 로컬 stdio와 인증된 원격 Streamable HTTP를 지원합니다. 정의 검증과 그래프 적재는 [semantic-definitions](https://github.com/zisu17/semantic-definitions)가 담당합니다. 이 서버의 도구는 그래프를 수정하거나 원본 DB에 접속하지 않습니다.
 
 ## 시작
 
@@ -18,6 +18,10 @@ uv run text2sql-graph-mcp
 ```
 
 `stdio` MCP 서버이므로 터미널에서 직접 실행하면 입력을 기다립니다. MCP 클라이언트에는 실행 명령 `uv run --directory /절대/경로/text2sql-mcp text2sql-graph-mcp`와 위 환경변수를 등록합니다. 클라이언트마다 등록 파일 위치와 형식은 다릅니다. 비밀번호를 Git에 저장하지 마세요.
+
+## 원격 배포
+
+Railway에서는 `Dockerfile`로 HTTP 앱을 실행하고 Neo4j AuraDB에 TLS로 접속합니다. `/mcp`는 별도 Bearer 토큰이 필요하며 `/healthz`는 배포 상태 확인용입니다. 기존 stdio 실행 명령은 그대로 사용할 수 있습니다. 환경변수 설정과 배포 후 확인 절차는 [Railway 배포 문서](docs/railway.md)에 있습니다.
 
 ## 조회 도구
 
