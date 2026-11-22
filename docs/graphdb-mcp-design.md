@@ -28,7 +28,7 @@ RETURN a.commit AS version, count(root) AS roots
 
 응답의 version_id는 이 commit을 담는 기존 MCP 호환 필드다. 활성 노드가 없으면 NO_ACTIVE_VERSION, 해당 Model이 정확히 하나가 아니면 SCHEMA_INCOMPATIBLE로 처리한다.
 
-## 여섯 조회 도구
+## 일곱 조회 도구
 
 | 도구 | 입력 | 반환 |
 |---|---|---|

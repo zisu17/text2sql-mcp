@@ -2,6 +2,18 @@
 
 Neo4j에 게시된 시맨틱 정의와 물리 계보를 조회하는 MCP 서버입니다. 로컬 stdio와 인증된 원격 Streamable HTTP를 지원합니다. 정의 검증과 그래프 적재는 [semantic-definitions](https://github.com/zisu17/semantic-definitions)가 담당합니다. 이 서버의 도구는 그래프를 수정하거나 원본 DB에 접속하지 않습니다.
 
+## 문서 안내
+
+| 문서 | 읽을 때 |
+| --- | --- |
+| 이 README | 서버 실행, 도구 목록, 기본 테스트를 확인할 때 |
+| [Graph MCP 조회 계약](docs/graphdb-mcp-design.md) | 활성 버전과 도구별 반환·계보 해석을 확인할 때 |
+| [Railway 운영](docs/railway.md) | 원격 인증, 이미지 배포, 운영 점검을 할 때 |
+| [계보 그래프 v2 설계안](docs/semantic-lineage-graph-v2.md) | 현재 게시 스키마와 다른 후속 설계안을 검토할 때 |
+| [최초 GraphDB 설계 재현](graphdb/README.md) | 초기 설계의 별도 적재 코드와 결과를 재현할 때 |
+
+현재 게시 스키마의 기준은 [semantic-definitions의 GraphDB 문서](https://github.com/zisu17/semantic-definitions/blob/main/docs/graphdb.md)입니다. v2 문서와 최초 설계 재현은 운영 절차가 아닙니다.
+
 ## 시작
 
 Python 3.11 이상과 실행 중인 Neo4j가 필요합니다.
