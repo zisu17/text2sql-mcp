@@ -4,7 +4,9 @@
 
 Railway의 Docker 서비스가 `text2sql_mcp.http_app:app`을 Streamable HTTP로 제공한다. 클라이언트는 `https://<공개 도메인>/mcp`에 Bearer 토큰을 보내고 서버는 `neo4j+s://`로 AuraDB를 조회한다. `text2sql_mcp.server`의 로컬 stdio 실행은 계속 지원한다. 이 서비스는 그래프를 적재하지 않는다.
 
-`GET /healthz`는 인증 없이 `ok`를 반환하는 **프로세스 상태 확인**이다. AuraDB 접속이나 그래프 적재 상태까지 확인하지 않는다. `/mcp`의 모든 HTTP 요청에는 Bearer 토큰이 필요하다. Host 허용 목록에는 `MCP_PUBLIC_HOST`를 사용하고 이 값이 없으면 Railway의 `RAILWAY_PUBLIC_DOMAIN`을 사용한다. 브라우저 Origin은 허용하지 않는다. 이 인증은 스터디용 공유 토큰이며 사용자별 권한이나 MCP OAuth를 제공하지 않는다.
+`GET /healthz`는 인증 없이 `ok`를 반환하는 **프로세스 상태 확인**이다. AuraDB 접속이나 그래프 적재 상태까지 확인하지 않는다. 인증 없이 열린 경로가 Neo4j에 접속하지 않게 하려고 DB 연결 확인용 경로(`/readyz` 등)는 따로 두지 않는다.
+
+AuraDB 연결과 활성 그래프까지 확인하려면 `/mcp`와 같은 토큰으로 `GET /snapshot`을 부른다. 200이면 활성 모델을 읽은 것이고, 503이면 Neo4j에 접속하지 못했거나 시간 안에 답을 받지 못한 것(`DB_UNAVAILABLE`, 인증 실패 포함), 404면 활성 모델이 없는 것, 500이면 서버의 조회가 게시된 그래프 모양과 맞지 않는 것(`SCHEMA_INCOMPATIBLE`) 등이다. 응답 본문의 `error.code`로 구분한다. 실패 원인은 서비스 로그의 `Neo4j read failed: <Neo4j 오류 코드> (<예외 이름>)` 줄에 남는다. 로그에는 오류 메시지와 쿼리 값을 남기지 않는다. `/mcp`의 모든 HTTP 요청에는 Bearer 토큰이 필요하다. Host 허용 목록에는 `MCP_PUBLIC_HOST`를 사용하고 이 값이 없으면 Railway의 `RAILWAY_PUBLIC_DOMAIN`을 사용한다. `/snapshot`도 `/mcp`와 같은 토큰과 Host 허용 목록을 거친다. 브라우저 Origin은 허용하지 않는다. 이 인증은 스터디용 공유 토큰이며 사용자별 권한이나 MCP OAuth를 제공하지 않는다.
 
 ## Railway 설정
 
@@ -38,7 +40,10 @@ python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 ```sh
 curl -i https://<공개 도메인>/healthz
 curl -i https://<공개 도메인>/mcp
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $MCP_API_TOKEN" https://<공개 도메인>/snapshot
 ```
+
+세 번째 명령은 셸에 `MCP_API_TOKEN`을 설정해 둔 뒤 실행하며, AuraDB까지 연결됐으면 `200`을 출력한다.
 
 첫 요청은 `200 OK`와 `ok`를 반환하고 두 번째 요청은 `401 Unauthorized`를 반환해야 한다. 클라이언트의 MCP 서버 설정에서 `Authorization: Bearer <MCP_API_TOKEN 값>` 헤더를 지정한다. `graph_list_models()`가 `olist_sales`를 반환하면 AuraDB까지 연결된 것이다. 빈 결과라면 AuraDB에서 활성 모델을 확인한다.
 
