@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Callable
 
 from neo4j import GraphDatabase, unit_of_work
@@ -17,6 +18,11 @@ log = logging.getLogger(__name__)
 # A query this server sent that no longer fits the published graph. Every other failure
 # (auth, transaction timeout, transient, driver/connection) means Neo4j could not answer.
 _QUERY_ERRORS = ("Neo.ClientError.Statement.", "Neo.ClientError.Schema.")
+
+# The full-text index semantic-definitions creates at publish time (Lucene, BM25 relevance).
+FULLTEXT_INDEX = "definition_text"
+_INDEX_UNAVAILABLE = re.compile(r"\bindex\b.*\b(does not exist|not online|populating)\b", re.I)
+_LUCENE_SPECIAL = re.compile(r'([+\-&|!(){}\[\]^"~*?:\\/])')
 
 RESULT_LIMIT = 128 * 1024  # tool results enter an LLM context
 SNAPSHOT_LIMIT = 1024 * 1024  # the snapshot is read by t2s, never by an LLM
@@ -40,6 +46,13 @@ def _roles(row: dict) -> list[str]:
     return roles or ["unknown"]
 
 
+def lucene_query(text: str) -> str:
+    """Words of the user's text as a Lucene OR query. Operators and special characters are escaped
+    (lower-casing also keeps AND/OR/NOT from acting as operators), so input is searched as plain words."""
+    words = [_LUCENE_SPECIAL.sub(r"\\\1", word) for word in text.lower().split()]
+    return " OR ".join(words)
+
+
 class GraphRepository:
     def __init__(self, config: Config):
         self.config = config
@@ -56,6 +69,9 @@ class GraphRepository:
         except Neo4jError as error:
             # Log the server code and class only: messages can quote query parameter values.
             log.warning("Neo4j read failed: %s (%s)", error.code, type(error).__name__)
+            if getattr(error, "gql_status", None) == "22N69" or _INDEX_UNAVAILABLE.search(error.message or ""):
+                # 22N69: index does not exist (graph published before the full-text index).
+                raise GraphError("INDEX_UNAVAILABLE", "Full-text index is missing or not online") from error
             if (error.code or "").startswith(_QUERY_ERRORS):
                 raise GraphError("SCHEMA_INCOMPATIBLE",
                                  "Graph query does not match the published graph schema") from error
@@ -117,7 +133,39 @@ class GraphRepository:
         if set(selected) - allowed or not 1 <= limit <= 50:
             raise GraphError("INVALID_INPUT", "Invalid kinds or limit (1..50)")
 
-        def work(tx: Any) -> dict:
+        text = query.strip().lower()
+
+        def items(rows: list[dict]) -> list[dict]:
+            return [{**{k: v for k, v in row.items() if k != "labels"},
+                     "kind": next(kind for kind in selected if kind in row["labels"])}
+                    for row in rows[:limit]]
+
+        def bm25(tx: Any) -> dict:
+            """Lucene full-text search (BM25 relevance) over ref, name, description and synonyms."""
+            scope = self._scope(tx, model)
+            # One index covers every tenant/model/version and SEARCH applies its LIMIT before the WHERE
+            # filter, so ask for as many hits as there are indexed nodes: nothing of this model is cut off.
+            indexed = _rows(tx, "MATCH (n:Definition) RETURN count(n) AS total")[0]["total"]
+            rows = _rows(tx, f"""
+                CYPHER 25
+                MATCH (n:Definition)
+                  SEARCH n IN (FULLTEXT INDEX {FULLTEXT_INDEX} FOR $lucene LIMIT $candidates) SCORE AS score
+                WHERE n.tenant = $tenant AND n.model = $model AND n.version = $version
+                  AND any(kind IN labels(n) WHERE kind IN $kinds)
+                WITH n, score, CASE WHEN toLower(coalesce(n.ref,'')) = $query THEN 0
+                                    WHEN toLower(coalesce(n.name,'')) = $query THEN 1
+                                    WHEN any(s IN coalesce(n.synonyms,[]) WHERE toLower(s) = $query) THEN 2
+                                    ELSE 3 END AS rank
+                RETURN n.id AS id, n.ref AS ref, n.name AS name,
+                       n.description AS description, n.synonyms AS synonyms,
+                       n.status AS status, labels(n) AS labels, round(score, 4) AS score
+                ORDER BY rank, score DESC, ref, id LIMIT $take
+            """, **scope, kinds=selected, query=text, lucene=lucene_query(text), take=limit + 1,
+                         candidates=max(indexed, 1))
+            return {**self._metadata(scope), "search": "bm25", "items": items(rows), "has_more": len(rows) > limit}
+
+        def substring(tx: Any) -> dict:
+            """Case-insensitive substring match, for graphs published before the full-text index."""
             scope = self._scope(tx, model)
             rows = _rows(tx, """
                 MATCH (n:Definition {tenant:$tenant,model:$model,version:$version})
@@ -126,16 +174,23 @@ class GraphRepository:
                        OR toLower(coalesce(n.name,'')) CONTAINS $query
                        OR toLower(coalesce(n.description,'')) CONTAINS $query
                        OR any(s IN coalesce(n.synonyms,[]) WHERE toLower(s) CONTAINS $query))
+                WITH n, CASE WHEN toLower(coalesce(n.ref,'')) = $query THEN 0
+                             WHEN toLower(coalesce(n.name,'')) = $query THEN 1
+                             WHEN any(s IN coalesce(n.synonyms,[]) WHERE toLower(s) = $query) THEN 2
+                             ELSE 3 END AS rank
                 RETURN n.id AS id, n.ref AS ref, n.name AS name,
                        n.description AS description, n.synonyms AS synonyms,
                        n.status AS status, labels(n) AS labels
-                ORDER BY ref,id LIMIT $take
-            """, **scope, kinds=selected, query=query.strip().lower(), take=limit + 1)
-            items = [{**{k: v for k, v in row.items() if k != "labels"},
-                      "kind": next(kind for kind in selected if kind in row["labels"])}
-                     for row in rows[:limit]]
-            return {**self._metadata(scope), "items": items, "has_more": len(rows) > limit}
-        return self._read(work)
+                ORDER BY rank, ref, id LIMIT $take
+            """, **scope, kinds=selected, query=text, take=limit + 1)
+            return {**self._metadata(scope), "search": "substring", "items": items(rows), "has_more": len(rows) > limit}
+
+        try:
+            return self._read(bm25)
+        except GraphError as error:
+            if error.code != "INDEX_UNAVAILABLE":
+                raise
+            return self._read(substring)
 
     def get_dataset(self, dataset: str, model: str | None = None) -> dict:
         def work(tx: Any) -> dict:
