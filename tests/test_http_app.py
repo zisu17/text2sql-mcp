@@ -77,7 +77,7 @@ class HTTPAppTest(unittest.TestCase):
                                                "method": "tools/list"}, headers=mcp_headers)
             self.assertEqual(listed.status_code, 200)
             names = {tool["name"] for tool in listed.json()["result"]["tools"]}
-            self.assertEqual(len(names), 6)
+            self.assertEqual(len(names), 7)
             self.assertNotIn("graph_get_model_snapshot", names)
 
     def test_snapshot_route(self):

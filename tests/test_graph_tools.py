@@ -14,6 +14,7 @@ from text2sql_mcp.server import mcp
 EXPECTED_TOOLS = {
     "graph_list_models", "graph_search_definitions", "graph_get_dataset",
     "graph_get_metric_lineage", "graph_get_column_impact", "graph_list_join_rules",
+    "graph_find_join_path",
 }
 
 

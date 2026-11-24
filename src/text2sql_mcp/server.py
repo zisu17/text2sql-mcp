@@ -77,6 +77,18 @@ def graph_list_join_rules(dataset: str | None = None, model: str | None = None) 
     return _call(repository().list_join_rules, dataset=dataset, model=model)
 
 
+@mcp.tool(structured_output=True)
+def graph_find_join_path(datasets: list[str], model: str | None = None,
+                         max_hops: int = 4) -> dict[str, Any]:
+    """Find the shortest approved join path between each adjacent pair of datasets.
+
+    A pair without an approved path is listed in `unreachable` with `unapproved_paths` over draft or
+    not-N:1 joins; using one is allowed but must be disclosed. `ambiguous` means several equally
+    short paths exist; `reverse` marks a hop that multiplies rows. Advisory only.
+    """
+    return _call(repository().find_join_path, datasets=datasets, model=model, max_hops=max_hops)
+
+
 def main() -> None:
     mcp.run(transport="stdio")
 

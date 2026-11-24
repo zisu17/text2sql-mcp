@@ -10,7 +10,7 @@ from neo4j import GraphDatabase, unit_of_work
 from neo4j.exceptions import DriverError, Neo4jError
 
 from .config import Config
-from .contracts import GraphError, column_key
+from .contracts import GraphError, column_key, is_table_source
 
 
 log = logging.getLogger(__name__)
@@ -32,6 +32,12 @@ def _one(rows: list[dict], kind: str) -> dict:
     if len(rows) != 1:
         raise GraphError("SCHEMA_INCOMPATIBLE", f"Duplicate {kind} in the active graph")
     return rows[0]
+
+
+def _roles(row: dict) -> list[str]:
+    """Every role of a metric->field edge. Graphs published before `roles` only have `role`."""
+    roles = [r for r in row.get("roles") or [row.get("role")] if r]
+    return roles or ["unknown"]
 
 
 class GraphRepository:
@@ -153,7 +159,9 @@ class GraphRepository:
                 RETURN m.id AS id, m.ref AS ref, m.name AS name,
                        m.description AS description, m.status AS status ORDER BY m.ref
             """, **p)
-            source_kind = "sql_query" if ds["source"].lstrip().upper().startswith("SELECT") else "table"
+            if not isinstance(ds["source"], str) or not ds["source"].strip():
+                raise GraphError("SCHEMA_INCOMPATIBLE", "Dataset has no source")
+            source_kind = "table" if is_table_source(ds["source"]) else "sql_query"
             if source_kind == "table":
                 tables = _rows(tx, """
                     MATCH (d:Dataset {tenant:$tenant,model:$model,version:$version,ref:$dataset})
@@ -285,7 +293,7 @@ class GraphRepository:
                 MATCH (m:Metric {tenant:$tenant,model:$model,version:$version,id:$metric_id})
                       -[r:DERIVED_FROM]->(f:Field {tenant:$tenant,model:$model,version:$version})
                 OPTIONAL MATCH (f)-[:DERIVED_FROM]->(c:Column {tenant:$tenant})
-                RETURN f.id AS id, f.ref AS ref, r.role AS role,
+                RETURN f.id AS id, f.ref AS ref, r.roles AS roles, r.role AS role,
                        c.source_id AS source_id, c.catalog AS catalog,
                        c.schema AS schema, c.table AS table, c.name AS column
                 ORDER BY ref,source_id,catalog,schema,table,column
@@ -293,17 +301,17 @@ class GraphRepository:
             fields: dict[str, dict] = {}
             row_set: list[dict] = []
             for row in rows:
-                role = row["role"] or "unknown"
+                roles = _roles(row)
                 item = fields.setdefault(row["id"], {"id": row["id"], "ref": row["ref"],
-                                                     "roles": [role], "value_columns": []})
+                                                     "roles": roles, "value_columns": []})
                 if row["column"] is None:
                     continue
                 key = column_key(row)
-                if role == "join":
-                    candidate = {"column": key, "roles": [role]}
+                if "join" in roles:
+                    candidate = {"column": key, "roles": ["join"]}
                     if candidate not in row_set:
                         row_set.append(candidate)
-                elif key not in item["value_columns"]:
+                if any(role != "join" for role in roles) and key not in item["value_columns"]:
                     item["value_columns"].append(key)
             return {**self._metadata(scope), "metric": m, "fields": list(fields.values()),
                     "row_set_candidates": row_set}
@@ -326,14 +334,17 @@ class GraphRepository:
                       -[:DERIVED_FROM]->(c:Column {tenant:$tenant,source_id:$source_id,
                           catalog:$catalog,schema:$schema,table:$table,name:$column})
                 RETURN m.dataset AS dataset, m.ref AS metric, m.status AS status,
-                       f.ref AS field, r.role AS role
+                       f.ref AS field, r.roles AS roles, r.role AS role
                 ORDER BY dataset,metric,field
             """, **p)
-            impacts = [{"dataset": row["dataset"], "metric": row["metric"],
-                        "status": row["status"], "field": row["field"],
-                        "roles": [row["role"] or "unknown"],
-                        "impact": "row_set_candidate" if row["role"] == "join" else "value"}
-                       for row in rows]
+            impacts = []
+            for row in rows:
+                roles = _roles(row)
+                # A field that is both a value and a join key changes the value and the row set.
+                impacts.append({"dataset": row["dataset"], "metric": row["metric"],
+                                "status": row["status"], "field": row["field"], "roles": roles,
+                                "impact": "value" if any(r != "join" for r in roles) else "row_set_candidate",
+                                "row_set_candidate": "join" in roles})
             return {**self._metadata(scope),
                     "column": {k: p[k] for k in ("source_id", "catalog", "schema", "table", "column")},
                     "impacts": impacts}
@@ -354,4 +365,74 @@ class GraphRepository:
                 ORDER BY name,from_dataset,to_dataset
             """, **scope, dataset=dataset)
             return {**self._metadata(scope), "rules": rows}
+        return self._read(work)
+
+    @staticmethod
+    def _paths(tx: Any, scope: dict, start: str, end: str, max_hops: int,
+               approved_only: bool) -> tuple[list[list[dict]], bool]:
+        """Shortest paths between two datasets (at most 5), and whether more exist."""
+        # A variable-length bound cannot be a Cypher parameter; max_hops is a validated int.
+        where = ("WHERE all(r IN relationships(p) WHERE r.status = 'approved' AND r.n_to_1 = true)"
+                 if approved_only else "")
+        rows = _rows(tx, f"""
+            MATCH (s:Dataset {{tenant:$tenant,model:$model,version:$version,ref:$start}}),
+                  (t:Dataset {{tenant:$tenant,model:$model,version:$version,ref:$end}}),
+                  p = allShortestPaths((s)-[:JOINS*..{max_hops}]-(t))
+            {where}
+            WITH [r IN relationships(p) | r.name] AS names, p
+            ORDER BY names LIMIT 6
+            RETURN [r IN relationships(p) | {{name: r.name, from: startNode(r).ref,
+                    to: endNode(r).ref, from_columns: r.from_columns,
+                    to_columns: r.to_columns, n_to_1: r.n_to_1, status: r.status}}] AS hops
+        """, **scope, start=start, end=end)
+        paths = []
+        for row in rows[:5]:
+            at, hops = start, []
+            for hop in row["hops"]:
+                # Walking a join from its one-row side to its many-row side multiplies rows.
+                reverse = hop["from"] != at
+                at = hop["from"] if reverse else hop["to"]
+                hops.append({**hop, "reverse": reverse})
+            paths.append(hops)
+        return paths, len(rows) > 5
+
+    def find_join_path(self, datasets: list[str], model: str | None = None,
+                       max_hops: int = 4) -> dict:
+        """Shortest approved N:1 join paths between each adjacent pair of datasets.
+
+        Prefers the joins t2s treats as approved (approved, target columns are a key). A pair with no
+        such path lands in `unreachable` with the shortest paths over any declared join, so a caller
+        can still join and disclose it. Advisory: `t2s validate` reports how a query's joins compare.
+        """
+        if (not isinstance(datasets, list) or not 2 <= len(datasets) <= 6
+                or any(not isinstance(name, str) or not name.strip() for name in datasets)):
+            raise GraphError("INVALID_INPUT", "datasets must list 2..6 dataset names")
+        if any(a == b for a, b in zip(datasets, datasets[1:])):
+            raise GraphError("INVALID_INPUT", "Adjacent datasets must differ")
+        if type(max_hops) is not int or not 1 <= max_hops <= 6:
+            raise GraphError("INVALID_INPUT", "max_hops must be an integer in 1..6")
+
+        def work(tx: Any) -> dict:
+            scope = self._scope(tx, model)
+            known = {row["ref"] for row in _rows(tx, """
+                MATCH (d:Dataset {tenant:$tenant,model:$model,version:$version})
+                WHERE d.ref IN $refs RETURN d.ref AS ref
+            """, **scope, refs=sorted(set(datasets)))}
+            missing = sorted(set(datasets) - known)
+            if missing:
+                raise GraphError("NOT_FOUND", "Unknown datasets: " + ", ".join(missing))
+            segments, unreachable = [], []
+            for start, end in zip(datasets, datasets[1:]):
+                paths, more = self._paths(tx, scope, start, end, max_hops, approved_only=True)
+                if paths:
+                    segments.append({"from": start, "to": end, "paths": paths,
+                                     "ambiguous": len(paths) > 1, "has_more": more})
+                    continue
+                # No approved path: still show the shortest path over any declared join (draft or
+                # not N:1) so the caller can join and say so, instead of stopping.
+                other, more = self._paths(tx, scope, start, end, max_hops, approved_only=False)
+                unreachable.append({"from": start, "to": end, "unapproved_paths": other,
+                                    "has_more": more})
+            return {**self._metadata(scope), "max_hops": max_hops,
+                    "segments": segments, "unreachable": unreachable}
         return self._read(work)
