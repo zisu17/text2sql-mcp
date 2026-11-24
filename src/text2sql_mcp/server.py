@@ -57,12 +57,6 @@ def graph_get_dataset(dataset: str, model: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool(structured_output=True)
-def graph_get_model_snapshot(model: str | None = None) -> dict[str, Any]:
-    """Get the active graph's executable semantic definition and version."""
-    return _call(repository().get_model_snapshot, model=model)
-
-
-@mcp.tool(structured_output=True)
 def graph_get_metric_lineage(dataset: str, metric: str,
                              model: str | None = None) -> dict[str, Any]:
     """Get value lineage and separate row-set dependencies for a metric."""

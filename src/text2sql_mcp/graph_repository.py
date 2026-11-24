@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Callable
 
 from neo4j import GraphDatabase, unit_of_work
-from neo4j.exceptions import Neo4jError, ServiceUnavailable
+from neo4j.exceptions import DriverError, Neo4jError
 
 from .config import Config
 from .contracts import GraphError, column_key
+
+
+log = logging.getLogger(__name__)
+# A query this server sent that no longer fits the published graph. Every other failure
+# (auth, transaction timeout, transient, driver/connection) means Neo4j could not answer.
+_QUERY_ERRORS = ("Neo.ClientError.Statement.", "Neo.ClientError.Schema.")
+
+RESULT_LIMIT = 128 * 1024  # tool results enter an LLM context
+SNAPSHOT_LIMIT = 1024 * 1024  # the snapshot is read by t2s, never by an LLM
 
 
 def _rows(tx: Any, cypher: str, **params: Any) -> list[dict]:
@@ -33,14 +43,23 @@ class GraphRepository:
     def close(self) -> None:
         self.driver.close()
 
-    def _read(self, action: Callable[[Any], dict]) -> dict:
+    def _read(self, action: Callable[[Any], dict], limit: int = RESULT_LIMIT) -> dict:
         try:
             with self.driver.session(database=self.config.database) as session:
                 result = session.execute_read(unit_of_work(timeout=5)(action))
-        except (Neo4jError, ServiceUnavailable, OSError) as error:
+        except Neo4jError as error:
+            # Log the server code and class only: messages can quote query parameter values.
+            log.warning("Neo4j read failed: %s (%s)", error.code, type(error).__name__)
+            if (error.code or "").startswith(_QUERY_ERRORS):
+                raise GraphError("SCHEMA_INCOMPATIBLE",
+                                 "Graph query does not match the published graph schema") from error
             raise GraphError("DB_UNAVAILABLE", "Neo4j query failed or timed out") from error
-        if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 128 * 1024:
-            raise GraphError("RESULT_TOO_LARGE", "Graph result exceeds 128 KiB")
+        except (DriverError, OSError) as error:
+            log.warning("Neo4j connection failed (%s)", type(error).__name__)
+            raise GraphError("DB_UNAVAILABLE", "Neo4j query failed or timed out") from error
+        if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > limit:
+            size = f"{limit // 1024 ** 2} MiB" if limit % 1024 ** 2 == 0 else f"{limit // 1024} KiB"
+            raise GraphError("RESULT_TOO_LARGE", f"Graph result exceeds {size}")
         return result
 
     def _scope(self, tx: Any, model: str | None) -> dict:
@@ -248,7 +267,7 @@ class GraphRepository:
             if root["instructions"]:
                 definition["ai_context"] = {"instructions": root["instructions"]}
             return {**self._metadata(scope), "definition": definition}
-        return self._read(work)
+        return self._read(work, limit=SNAPSHOT_LIMIT)
 
     def get_metric_lineage(self, dataset: str, metric: str,
                            model: str | None = None) -> dict:

@@ -6,6 +6,20 @@ from unittest.mock import patch
 
 from starlette.testclient import TestClient
 
+from text2sql_mcp.contracts import GraphError
+
+
+class FakeRepository:
+    def __init__(self, error=None):
+        self.error, self.calls = error, []
+
+    def get_model_snapshot(self, model=None):
+        self.calls.append(model)
+        if self.error:
+            raise self.error
+        return {"tenant": "olist", "model": model or "olist_sales", "version_id": "v1",
+                "definition": {"name": "olist_sales", "description": "매출", "datasets": []}}
+
 
 class HTTPAppTest(unittest.TestCase):
     def test_railway_first_deploy_without_domain(self):
@@ -20,6 +34,10 @@ class HTTPAppTest(unittest.TestCase):
                 "Authorization": "Bearer " + "t" * 40,
                 "Origin": "https://other.example.test",
             }).status_code, 403)
+            # No public domain yet: like /mcp, /snapshot does not check Host.
+            with patch("text2sql_mcp.http_app.repository", return_value=FakeRepository()):
+                self.assertEqual(client.get("/snapshot", headers={
+                    "Authorization": "Bearer " + "t" * 40}).status_code, 200)
 
     def test_health_auth_host_and_origin(self):
         token = "t" * 40
@@ -58,7 +76,45 @@ class HTTPAppTest(unittest.TestCase):
             listed = client.post("/mcp", json={"jsonrpc": "2.0", "id": 2,
                                                "method": "tools/list"}, headers=mcp_headers)
             self.assertEqual(listed.status_code, 200)
-            self.assertEqual(len(listed.json()["result"]["tools"]), 7)
+            names = {tool["name"] for tool in listed.json()["result"]["tools"]}
+            self.assertEqual(len(names), 6)
+            self.assertNotIn("graph_get_model_snapshot", names)
+
+    def test_snapshot_route(self):
+        token = "t" * 40
+        env = {"MCP_PUBLIC_HOST": "mcp.example.test", "MCP_API_TOKEN": token}
+        with patch.dict(os.environ, env):
+            from text2sql_mcp.http_app import create_app
+        authorized = {"Authorization": f"Bearer {token}"}
+        with TestClient(create_app(env), base_url="http://mcp.example.test") as client:
+            self.assertEqual(client.get("/snapshot").status_code, 401)
+            self.assertEqual(client.get("/snapshot", headers={"Authorization": "Bearer wrong"}).status_code, 401)
+            self.assertEqual(client.get("/snapshot", headers={
+                **authorized, "Origin": "https://other.example.test"}).status_code, 403)
+            with patch("text2sql_mcp.http_app.repository", return_value=FakeRepository()):
+                # Same Host allow-list as /mcp (DNS-rebinding protection).
+                self.assertEqual(client.get("/snapshot", headers={
+                    **authorized, "Host": "other.example.test"}).status_code, 421)
+                self.assertEqual(client.get("/snapshot", headers={
+                    **authorized, "Host": "mcp.example.test:443"}).status_code, 200)
+            repo = FakeRepository()
+            with patch("text2sql_mcp.http_app.repository", return_value=repo):
+                default = client.get("/snapshot", headers=authorized)
+                named = client.get("/snapshot/other_model", headers=authorized)
+                posted = client.post("/snapshot", headers=authorized)
+            self.assertEqual(default.status_code, 200)
+            self.assertEqual(default.headers["content-type"], "application/json")
+            self.assertEqual(default.json(), FakeRepository().get_model_snapshot())
+            self.assertEqual(named.json()["model"], "other_model")
+            self.assertEqual(repo.calls, [None, "other_model"])
+            self.assertEqual(posted.status_code, 405)
+            for code, status in (("NOT_FOUND", 404), ("NO_ACTIVE_VERSION", 404),
+                                 ("DB_UNAVAILABLE", 503), ("RESULT_TOO_LARGE", 500)):
+                failing = FakeRepository(GraphError(code, "reason"))
+                with patch("text2sql_mcp.http_app.repository", return_value=failing):
+                    response = client.get("/snapshot", headers=authorized)
+                self.assertEqual(response.status_code, status)
+                self.assertEqual(response.json(), {"error": {"code": code, "message": "reason"}})
 
 
 if __name__ == "__main__":
