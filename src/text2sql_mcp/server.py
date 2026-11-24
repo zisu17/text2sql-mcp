@@ -45,8 +45,10 @@ def graph_list_models() -> dict[str, Any]:
 
 @mcp.tool(structured_output=True)
 def graph_search_definitions(query: str, kinds: list[str] | None = None,
-                             model: str | None = None, limit: int = 20) -> dict[str, Any]:
+                             model: str | None = None, limit: int = 3) -> dict[str, Any]:
     """Search active datasets, fields, and metrics by text, ranked by BM25 relevance.
+
+    Returns the top 3 by default; `has_more` says more matched (raise `limit`, up to 50).
 
     Exact ref/name/synonym matches come first. `search` says which method ran: "bm25" (full-text index)
     or "substring" (graphs published before the index). Words are searched as plain text.

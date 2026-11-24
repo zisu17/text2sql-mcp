@@ -79,6 +79,32 @@ def _repo(tx):
     return repo
 
 
+class CountingTx(FakeTx):
+    def __init__(self):
+        super().__init__()
+        self.queries = 0
+
+    def run(self, cypher, params):
+        self.queries += 1
+        return super().run(cypher, params)
+
+
+class SnapshotReuseTest(unittest.TestCase):
+    def test_same_active_version_is_built_once(self):
+        tx = CountingTx()
+        repo = _repo(tx)
+        first = repo.get_model_snapshot()
+        built = tx.queries
+        self.assertEqual(repo.get_model_snapshot(), first)
+        self.assertEqual(tx.queries - built, 1)  # only the ActiveVersion read
+
+    def test_oversized_snapshot_is_not_kept(self):
+        repo = _repo(FakeTx("x" * (SNAPSHOT_LIMIT + 1)))
+        with self.assertRaises(GraphError):
+            repo.get_model_snapshot()
+        self.assertEqual(repo._snapshots, {})
+
+
 class SnapshotLimitTest(unittest.TestCase):
     def test_snapshot_may_exceed_the_tool_limit(self):
         result = _repo(FakeTx("x" * (RESULT_LIMIT + 1))).get_model_snapshot()

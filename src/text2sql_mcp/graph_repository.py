@@ -26,6 +26,7 @@ _LUCENE_SPECIAL = re.compile(r'([+\-&|!(){}\[\]^"~*?:\\/])')
 
 RESULT_LIMIT = 128 * 1024  # tool results enter an LLM context
 SNAPSHOT_LIMIT = 1024 * 1024  # the snapshot is read by t2s, never by an LLM
+SNAPSHOT_VERSIONS = 8  # ponytail: oldest-first eviction, an LRU if many models are served at once
 
 
 def _rows(tx: Any, cypher: str, **params: Any) -> list[dict]:
@@ -125,7 +126,7 @@ class GraphRepository:
         return self._read(work)
 
     def search_definitions(self, query: str, kinds: list[str] | None = None,
-                           model: str | None = None, limit: int = 20) -> dict:
+                           model: str | None = None, limit: int = 3) -> dict:
         if not query.strip():
             raise GraphError("INVALID_INPUT", "query must not be empty")
         allowed = {"Dataset", "Field", "Metric"}
@@ -246,9 +247,17 @@ class GraphRepository:
         return self._read(work)
 
     def get_model_snapshot(self, model: str | None = None) -> dict:
-        """Return the active graph's executable semantic definition, in memory."""
+        """Return the active graph's executable semantic definition, in memory.
+
+        A published version never changes, so its built definition is kept per (tenant, model, version):
+        a repeat request costs one ActiveVersion read instead of six queries."""
+        snapshots = self.__dict__.setdefault("_snapshots", {})
+
         def work(tx: Any) -> dict:
             scope = self._scope(tx, model)
+            cached = snapshots.get((scope["tenant"], scope["model"], scope["version"]))
+            if cached is not None:
+                return cached
             root = _one(_rows(tx, """
                 MATCH (m:Model {tenant:$tenant,model:$model,version:$version})
                 RETURN m.ref AS name, m.description AS description,
@@ -330,7 +339,13 @@ class GraphRepository:
             if root["instructions"]:
                 definition["ai_context"] = {"instructions": root["instructions"]}
             return {**self._metadata(scope), "definition": definition}
-        return self._read(work, limit=SNAPSHOT_LIMIT)
+        result = self._read(work, limit=SNAPSHOT_LIMIT)
+        key = (result["tenant"], result["model"], result["version_id"])
+        if key not in snapshots:  # only after the size check passed
+            if len(snapshots) >= SNAPSHOT_VERSIONS:
+                snapshots.pop(next(iter(snapshots)), None)
+            snapshots[key] = result
+        return result
 
     def get_metric_lineage(self, dataset: str, metric: str,
                            model: str | None = None) -> dict:

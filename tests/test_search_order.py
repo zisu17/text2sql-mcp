@@ -76,7 +76,7 @@ def _repo(tx, missing_index=False):
 class SearchTest(unittest.TestCase):
     def test_bm25_orders_exact_matches_then_relevance(self):
         tx = FakeTx()
-        result = _repo(tx).search_definitions("Price", limit=3)
+        result = _repo(tx).search_definitions("Price")  # default: top 3, results go into the LLM context
         self.assertEqual(result["search"], "bm25")
         # exact ref, then exact name ordered by BM25 score, then the rest
         self.assertEqual([i["ref"] for i in result["items"]], ["price", "order_lines.price", "order_items.price"])
