@@ -101,12 +101,17 @@ class HTTPAppTest(unittest.TestCase):
             with patch("text2sql_mcp.http_app.repository", return_value=repo):
                 default = client.get("/snapshot", headers=authorized)
                 named = client.get("/snapshot/other_model", headers=authorized)
+                conditional = {"If-None-Match": default.headers["etag"]}
+                cached = client.get("/snapshot", headers={**authorized, **conditional})
+                self.assertEqual((cached.status_code, cached.content), (304, b""))
+                self.assertEqual(client.get("/snapshot", headers=conditional).status_code, 401)
+                self.assertEqual(client.get("/snapshot/other_model", headers={**authorized, **conditional}).status_code, 200)
                 posted = client.post("/snapshot", headers=authorized)
             self.assertEqual(default.status_code, 200)
             self.assertEqual(default.headers["content-type"], "application/json")
             self.assertEqual(default.json(), FakeRepository().get_model_snapshot())
             self.assertEqual(named.json()["model"], "other_model")
-            self.assertEqual(repo.calls, [None, "other_model"])
+            self.assertEqual(repo.calls, [None, "other_model", None, "other_model"])
             self.assertEqual(posted.status_code, 405)
             for code, status in (("NOT_FOUND", 404), ("NO_ACTIVE_VERSION", 404),
                                  ("DB_UNAVAILABLE", 503), ("RESULT_TOO_LARGE", 500)):

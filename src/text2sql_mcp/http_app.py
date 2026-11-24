@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 import hmac
 import os
 from typing import Mapping
@@ -24,7 +25,13 @@ async def _snapshot(scope: Scope) -> Response:
     model = scope["path"][len("/snapshot"):].lstrip("/") or None
     try:
         # The Neo4j driver is synchronous; keep it off the event loop.
-        return JSONResponse(await run_in_threadpool(repository().get_model_snapshot, model=model))
+        response = JSONResponse(await run_in_threadpool(repository().get_model_snapshot, model=model))
+        etag = '"' + sha256(response.body).hexdigest() + '"'
+        headers = {"ETag": etag, "Cache-Control": "private, no-cache", "Vary": "Authorization"}
+        if any(k.lower() == b"if-none-match" and v == etag.encode("ascii") for k, v in scope["headers"]):
+            return Response(status_code=304, headers=headers)
+        response.headers.update(headers)
+        return response
     except GraphError as error:
         return JSONResponse({"error": {"code": error.code, "message": error.args[0]}},
                             status_code=_STATUS.get(error.code, 500))
