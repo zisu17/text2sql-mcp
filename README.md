@@ -47,6 +47,8 @@ Railway에서는 `Dockerfile`로 HTTP 앱을 실행하고 Neo4j AuraDB에 TLS로
 | `graph_list_join_rules` | 선언된 조인 규칙과 상태 |
 | `graph_find_join_path` | 데이터셋 사이의 승인된 최단 조인 경로. 없으면 승인 전 연결로 가는 경로도 함께 알려 준다. 안내용이다 |
 
+정의 검색은 기본으로 후보 1건을 반환합니다. 후보가 충분하지 않고 `has_more`가 참이면 `limit`(최대 50)을 높여 다시 조회합니다. 성공한 도구 호출의 JSON은 `structuredContent`에서 읽습니다. 오류 메시지는 `content`에 들어갑니다.
+
 실행용 시맨틱 모델 전체는 MCP 도구로 제공하지 않습니다. LLM이 모델 전체를 불러오지 않게 하기 위해서입니다. 파일 없이 SQL을 생성하는 클라이언트(`t2s`)는 HTTP 앱의 `GET /snapshot`(기본 모델) 또는 `GET /snapshot/{model}`을 `/mcp`와 같은 Bearer 토큰으로 호출합니다. 응답은 `tenant`, `model`, `version_id`, `definition`이 든 JSON이며 1 MiB까지 허용합니다. 서버는 버전별로 만든 정의를 메모리에 최대 8개 보관하므로, 같은 활성 버전을 다시 요청하면 활성 버전 확인 조회 한 번으로 답합니다. 클라이언트가 이전 응답의 ETag를 `If-None-Match`로 보내면 인증과 활성 모델 확인을 거친 뒤 내용이 같을 때 HTTP 304를 반환합니다. 오류는 `{"error": {"code", "message"}}`와 상태 코드(모델 없음 404, Neo4j 접속 실패 503, 그 밖 500)로 반환합니다. stdio 실행에는 이 경로가 없습니다.
 
 모든 정의 조회는 `ActiveVersion.commit`과 `Model.version`이 일치하는 현재 버전으로 한정됩니다. 응답의 `version_id`는 이 활성 커밋 값입니다. 물리 컬럼은 `source_id`, `catalog`, `schema`, `table`, `column`으로 식별합니다. `row_set_candidate`는 `DERIVED_FROM`의 `roles`(예전 그래프는 `role`)에 `join`이 든 영향 후보입니다. 값과 조인 키를 함께 맡는 필드는 값 영향(`impact: value`)이면서 `row_set_candidate: true`입니다. SQL 소스의 물리 테이블 목록은 필드 계보에서 찾은 범위만 반환하며 `tables_basis=field_lineage`로 표시합니다.
@@ -72,4 +74,4 @@ GitHub Actions의 이미지 게시는 `uv sync --frozen`과 이 단위 테스트
 - `GET /snapshot`도 `/mcp`와 같은 토큰·Host 허용 목록을 거칩니다.
 - 계보 조회가 `roles`를 읽습니다. 이 값은 semantic-definitions의 게시 코드로 다시 게시해야 그래프에 생깁니다.
 - 검색은 참조명·이름·동의어가 정확히 같은 항목을 먼저, 그다음 전문 검색 인덱스의 BM25 관련도 순으로 정렬하고 항목마다 `score`를 줍니다. 인덱스(`definition_text`)는 semantic-definitions가 게시할 때 만들고, 없으면 예전 부분 일치 검색을 씁니다. 데이터셋 소스 판별을 t2s와 같은 규칙으로 바꿨습니다. Neo4j 오류를 코드로 나눠 `SCHEMA_INCOMPATIBLE`과 `DB_UNAVAILABLE`로 돌려줍니다.
-- 검색 결과 기본 개수를 20개에서 3개로 줄였습니다. 결과가 모델의 맥락에 그대로 들어가기 때문입니다. 더 있으면 `has_more`가 `true`이고, `limit`(최대 50)으로 더 받습니다.
+- 기본 검색 결과를 1건으로 줄이고 성공 응답의 텍스트 사본을 제거했습니다.

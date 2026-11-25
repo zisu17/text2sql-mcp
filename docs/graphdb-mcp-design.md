@@ -42,6 +42,8 @@ RETURN a.commit AS version, count(root) AS roots
 
 Concept가 게시되지 않으므로 graph_get_concept_mapping은 제거했다. 검색 kinds의 Concept도 허용하지 않는다.
 
+성공한 MCP 도구 호출의 데이터는 `structuredContent` 한 곳에 담는다. 클라이언트는 이 필드에서 결과를 읽는다. 오류 메시지는 `content`로 반환한다.
+
 실행용 시맨틱 모델 전체(스냅샷)는 0.3.0부터 MCP 도구가 아니다. 예전 graph_get_model_snapshot 도구는 LLM이 모델 전체를 맥락에 넣을 수 있어 지웠다. MCP 리소스로도 내지 않는다. Claude Code는 리소스를 읽는 도구를 LLM에 자동으로 주기 때문이다. 대신 HTTP 앱이 `/mcp`와 같은 Bearer 인증 뒤에 `GET /snapshot`, `GET /snapshot/{model}`을 둔다. 이 경로는 t2s만 부른다. 반환은 tenant, model, version_id, definition(Ossie 실행용 정의)이고 응답 상한은 1 MiB다. 오류는 `{"error": {"code", "message"}}`와 HTTP 상태(NOT_FOUND·NO_ACTIVE_VERSION 404, DB_UNAVAILABLE 503, 그 밖 500)다. stdio 실행에는 이 경로가 없다.
 
 graph_find_join_path는 먼저 t2s 엔진이 승인된 연결로 보는 관계만 따라간다. 모든 관계가 status='approved'이고 n_to_1=true여야 한다. 그런 경로가 없는 쌍은 unreachable에 넣고, 선언된 JOINS 전부(승인 전, N:1 아님 포함)로 구한 최단 경로를 unapproved_paths로 함께 준다. hop마다 status와 n_to_1이 있다. 이 경로로 조인하는 것은 막지 않으며 답에 밝히게 한다. 방향은 보지 않고 allShortestPaths로 같은 길이의 경로를 모두 구해 이름 순으로 최대 5개를 돌려준다. 둘 이상이면 ambiguous, 더 있으면 has_more를 붙인다. hop마다 관계의 from·to와 키를 주고, 경로를 따라가는 방향이 관계의 to→from이면 reverse=true다. 이 방향은 한 행 쪽에서 여러 행 쪽으로 가므로 행이 늘어난다. 없는 데이터셋은 NOT_FOUND, 같은 이름이 이웃하면 INVALID_INPUT이다. 가변 길이 상한은 정수 검증 뒤 Cypher에 넣고 나머지 값은 매개변수로 넘긴다. 안내용이다. t2s는 승인 안 된 조인을 막지 않고 결과의 unapproved_join 경고로 알린다.
@@ -52,7 +54,7 @@ graph_find_join_path는 먼저 t2s 엔진이 승인된 연결로 보는 관계�
 
 조인은 Dataset-[JOINS]->Dataset에서 읽는다. status와 n_to_1을 그대로 보여준다. n_to_1은 선언된 키와 일치한다는 뜻이며 실제 데이터의 유일성 검증이 아니다. 이전 data_verified 속성은 없다.
 
-검색은 semantic-definitions가 게시할 때 만드는 전문 검색 인덱스 `definition_text`(Definition 노드의 ref·name·description·synonyms, Lucene `cjk` 분석기)를 Cypher 25 `SEARCH` 절로 읽는다. 정렬은 참조명이 정확히 같은 항목, 이름이 정확히 같은 항목, 동의어 하나가 정확히 같은 항목, 그다음 Lucene 관련도 점수(BM25) 순이고 항목마다 `score`를 준다. 입력은 낱말마다 Lucene 특수 문자를 이스케이프해 OR로 묶으므로 연산자로 해석되지 않는다. 인덱스 하나가 모든 tenant·model·version을 담고 `SEARCH`의 LIMIT이 tenant·model 필터보다 먼저 걸리므로, 후보 수를 색인된 Definition 노드 수와 같게 받아 이 모델의 항목이 잘리지 않게 한 뒤 거른다. 인덱스가 없거나 아직 준비 중이면(GQLSTATUS 22N69 등) 이름·참조명·설명·동의어의 부분 일치로 대신 찾고 `search: substring`으로 표시한다. limit 기본 3, 상한 50이다. 결과가 모델의 맥락에 그대로 들어가므로 관련도 상위 몇 개만 주고, 더 있으면 `has_more`로 알린다. 도구 응답 제한은 128 KiB, 스냅샷은 1 MiB, 읽기 트랜잭션 시간 상한은 5초다.
+검색은 semantic-definitions가 게시할 때 만드는 전문 검색 인덱스 `definition_text`(Definition 노드의 ref·name·description·synonyms, Lucene `cjk` 분석기)를 Cypher 25 `SEARCH` 절로 읽는다. 정렬은 참조명이 정확히 같은 항목, 이름이 정확히 같은 항목, 동의어 하나가 정확히 같은 항목, 그다음 Lucene 관련도 점수(BM25) 순이고 항목마다 `score`를 준다. 입력은 낱말마다 Lucene 특수 문자를 이스케이프해 OR로 묶으므로 연산자로 해석되지 않는다. 인덱스 하나가 모든 tenant·model·version을 담고 `SEARCH`의 LIMIT이 tenant·model 필터보다 먼저 걸리므로, 후보 수를 색인된 Definition 노드 수와 같게 받아 이 모델의 항목이 잘리지 않게 한 뒤 거른다. 인덱스가 없거나 아직 준비 중이면(GQLSTATUS 22N69 등) 이름·참조명·설명·동의어의 부분 일치로 대신 찾고 `search: substring`으로 표시한다. 검색은 기본 1건을 반환한다. 추가 후보가 있으면 `has_more`로 알린다. 첫 후보가 부족할 때는 `limit`을 높여 다시 검색할 수 있다. 상한은 50건이다. 도구 응답 제한은 128 KiB, 스냅샷은 1 MiB, 읽기 트랜잭션 시간 상한은 5초다.
 
 Neo4j 오류는 서버 오류 코드로 나눈다. Neo.ClientError.Statement.*·Neo.ClientError.Schema.*는 조회가 게시 그래프 모양과 맞지 않는 것이라 SCHEMA_INCOMPATIBLE이다. 인증·권한(Neo.ClientError.Security.*), 트랜잭션 시간 초과(Neo.ClientError.Transaction.*), 일시 오류, 드라이버·연결 오류는 DB_UNAVAILABLE이다. 로그에는 오류 코드와 예외 이름만 남기고 메시지와 쿼리 값은 남기지 않는다. Cypher는 코드에 고정하고 입력은 매개변수로 전달한다. execute_read()는 DB 권한 경계가 아니므로 DB 차원의 쓰기 차단이 필요하면 읽기 전용 계정을 사용한다.
 

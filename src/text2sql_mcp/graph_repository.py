@@ -21,6 +21,7 @@ _QUERY_ERRORS = ("Neo.ClientError.Statement.", "Neo.ClientError.Schema.")
 
 # The full-text index semantic-definitions creates at publish time (Lucene, BM25 relevance).
 FULLTEXT_INDEX = "definition_text"
+DEFAULT_SEARCH_LIMIT = 1
 _INDEX_UNAVAILABLE = re.compile(r"\bindex\b.*\b(does not exist|not online|populating)\b", re.I)
 _LUCENE_SPECIAL = re.compile(r'([+\-&|!(){}\[\]^"~*?:\\/])')
 
@@ -126,7 +127,7 @@ class GraphRepository:
         return self._read(work)
 
     def search_definitions(self, query: str, kinds: list[str] | None = None,
-                           model: str | None = None, limit: int = 3) -> dict:
+                           model: str | None = None, limit: int = DEFAULT_SEARCH_LIMIT) -> dict:
         if not query.strip():
             raise GraphError("INVALID_INPUT", "query must not be empty")
         allowed = {"Dataset", "Field", "Metric"}

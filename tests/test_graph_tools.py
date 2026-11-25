@@ -19,9 +19,10 @@ EXPECTED_TOOLS = {
 
 
 class FakeRepository:
-    def search_definitions(self, **kwargs):
+    def search_definitions(self, query, kinds, model, limit):
+        matches = [{"kind": "Metric", "ref": "revenue"}, {"kind": "Metric", "ref": "item_price_total"}]
         return {"tenant": "olist", "model": "olist_sales", "version_id": "v1",
-                "items": [{"kind": "Metric", "ref": "revenue"}], "has_more": False}
+                "items": matches[:limit], "has_more": len(matches) > limit}
 
     def get_dataset(self, **kwargs):
         raise GraphError("NOT_FOUND", "dataset was not found in the active graph")
@@ -39,10 +40,21 @@ class MCPToolsTest(unittest.TestCase):
                 self.assertEqual({tool.name for tool in tools}, EXPECTED_TOOLS)
                 self.assertTrue(all(not any(word in tool.name for word in
                                             ("write", "load", "publish", "cypher")) for tool in tools))
+                self.assertTrue(all(tool.output_schema["type"] == "object" for tool in tools))
+                search = next(tool for tool in tools if tool.name == "graph_search_definitions")
+                self.assertEqual(search.input_schema["properties"]["limit"]["default"], 1)
                 with patch("text2sql_mcp.server.repository", return_value=FakeRepository()):
                     result = await client.call_tool("graph_search_definitions", {"query": "매출"})
+                    expanded = await client.call_tool("graph_search_definitions", {"query": "매출", "limit": 3})
                 self.assertFalse(result.is_error)
-                self.assertEqual(result.structured_content["items"][0]["ref"], "revenue")
+                self.assertEqual(result.content, [])
+                self.assertEqual([item["ref"] for item in result.structured_content["items"]], ["revenue"])
+                self.assertTrue(result.structured_content["has_more"])
+                self.assertFalse(expanded.is_error)
+                self.assertEqual(expanded.content, [])
+                self.assertEqual([item["ref"] for item in expanded.structured_content["items"]],
+                                 ["revenue", "item_price_total"])
+                self.assertFalse(expanded.structured_content["has_more"])
                 # The full model is served to t2s over GET /snapshot, never as an LLM-callable tool.
                 self.assertNotIn("graph_get_model_snapshot", {tool.name for tool in tools})
                 self.assertEqual((await client.list_resources()).resources, [])

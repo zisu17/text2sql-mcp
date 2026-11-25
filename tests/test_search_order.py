@@ -74,9 +74,18 @@ def _repo(tx, missing_index=False):
 
 
 class SearchTest(unittest.TestCase):
+    def test_defaults_to_one_result_and_advertises_more(self):
+        for missing_index in (False, True):
+            with self.subTest(missing_index=missing_index):
+                tx = FakeTx()
+                result = _repo(tx, missing_index=missing_index).search_definitions("price")
+                self.assertEqual([i["ref"] for i in result["items"]], ["price"])
+                self.assertTrue(result["has_more"])
+                self.assertEqual(tx.params["take"], 2)
+
     def test_bm25_orders_exact_matches_then_relevance(self):
         tx = FakeTx()
-        result = _repo(tx).search_definitions("Price")  # default: top 3, results go into the LLM context
+        result = _repo(tx).search_definitions("Price", limit=3)
         self.assertEqual(result["search"], "bm25")
         # exact ref, then exact name ordered by BM25 score, then the rest
         self.assertEqual([i["ref"] for i in result["items"]], ["price", "order_lines.price", "order_items.price"])

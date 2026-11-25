@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import atexit
 from functools import lru_cache
-from typing import Any, Callable
+from typing import Annotated, Any, Callable
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult
 
 from .config import Config
 from .contracts import GraphError
-from .graph_repository import GraphRepository
+from .graph_repository import DEFAULT_SEARCH_LIMIT, GraphRepository
 
 
 mcp = MCPServer("text2sql-graph")
+GraphToolResult = Annotated[CallToolResult, dict[str, Any]]
 
 
 @lru_cache(maxsize=1)
@@ -30,25 +32,26 @@ def _close_repository() -> None:
 atexit.register(_close_repository)
 
 
-def _call(method: Callable[..., dict], **kwargs: Any) -> dict:
+def _call(method: Callable[..., dict[str, Any]], **kwargs: Any) -> CallToolResult:
     try:
-        return method(**kwargs)
+        # Hosts that forward both result fields would put two copies in the model context.
+        return CallToolResult(content=[], structured_content=method(**kwargs))
     except GraphError as error:
         raise ToolError(str(error)) from error
 
 
 @mcp.tool(structured_output=True)
-def graph_list_models() -> dict[str, Any]:
+def graph_list_models() -> GraphToolResult:
     """List active semantic models in the configured tenant."""
     return _call(repository().list_models)
 
 
 @mcp.tool(structured_output=True)
 def graph_search_definitions(query: str, kinds: list[str] | None = None,
-                             model: str | None = None, limit: int = 3) -> dict[str, Any]:
+                             model: str | None = None, limit: int = DEFAULT_SEARCH_LIMIT) -> GraphToolResult:
     """Search active datasets, fields, and metrics by text, ranked by BM25 relevance.
 
-    Returns the top 3 by default; `has_more` says more matched (raise `limit`, up to 50).
+    Returns one match by default. If it is insufficient and `has_more` is true, raise `limit` (max 50).
 
     Exact ref/name/synonym matches come first. `search` says which method ran: "bm25" (full-text index)
     or "substring" (graphs published before the index). Words are searched as plain text.
@@ -57,35 +60,35 @@ def graph_search_definitions(query: str, kinds: list[str] | None = None,
 
 
 @mcp.tool(structured_output=True)
-def graph_get_dataset(dataset: str, model: str | None = None) -> dict[str, Any]:
+def graph_get_dataset(dataset: str, model: str | None = None) -> GraphToolResult:
     """Get a dataset's fields, metrics, and physical source tables."""
     return _call(repository().get_dataset, dataset=dataset, model=model)
 
 
 @mcp.tool(structured_output=True)
 def graph_get_metric_lineage(dataset: str, metric: str,
-                             model: str | None = None) -> dict[str, Any]:
+                             model: str | None = None) -> GraphToolResult:
     """Get value lineage and separate row-set dependencies for a metric."""
     return _call(repository().get_metric_lineage, dataset=dataset, metric=metric, model=model)
 
 
 @mcp.tool(structured_output=True)
 def graph_get_column_impact(source_id: str, catalog: str, schema: str,
-                            table: str, column: str, model: str | None = None) -> dict[str, Any]:
+                            table: str, column: str, model: str | None = None) -> GraphToolResult:
     """Find metrics affected by a fully qualified physical column."""
     return _call(repository().get_column_impact, source_id=source_id, catalog=catalog,
                  schema=schema, table=table, column=column, model=model)
 
 
 @mcp.tool(structured_output=True)
-def graph_list_join_rules(dataset: str | None = None, model: str | None = None) -> dict[str, Any]:
+def graph_list_join_rules(dataset: str | None = None, model: str | None = None) -> GraphToolResult:
     """List declared dataset joins and their status and cardinality claim."""
     return _call(repository().list_join_rules, dataset=dataset, model=model)
 
 
 @mcp.tool(structured_output=True)
 def graph_find_join_path(datasets: list[str], model: str | None = None,
-                         max_hops: int = 4) -> dict[str, Any]:
+                         max_hops: int = 4) -> GraphToolResult:
     """Find the shortest approved join path between each adjacent pair of datasets.
 
     A pair without an approved path is listed in `unreachable` with `unapproved_paths` over draft or

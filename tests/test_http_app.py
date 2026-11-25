@@ -20,6 +20,9 @@ class FakeRepository:
         return {"tenant": "olist", "model": model or "olist_sales", "version_id": "v1",
                 "definition": {"name": "olist_sales", "description": "매출", "datasets": []}}
 
+    def list_models(self):
+        return {"tenant": "olist", "models": [{"model": "olist_sales", "version_id": "v1"}], "has_more": False}
+
 
 class HTTPAppTest(unittest.TestCase):
     def test_railway_first_deploy_without_domain(self):
@@ -79,6 +82,17 @@ class HTTPAppTest(unittest.TestCase):
             names = {tool["name"] for tool in listed.json()["result"]["tools"]}
             self.assertEqual(len(names), 7)
             self.assertNotIn("graph_get_model_snapshot", names)
+            repo = FakeRepository()
+            with patch("text2sql_mcp.server.repository", return_value=repo):
+                called = client.post("/mcp", json={
+                    "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "graph_list_models", "arguments": {}},
+                }, headers=mcp_headers)
+            self.assertEqual(called.status_code, 200)
+            result = called.json()["result"]
+            self.assertFalse(result.get("isError", False))
+            self.assertEqual(result["structuredContent"], repo.list_models())
+            self.assertEqual(result["content"], [])
 
     def test_snapshot_route(self):
         token = "t" * 40
