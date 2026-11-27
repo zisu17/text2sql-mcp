@@ -34,7 +34,7 @@ class PublishedGraphTest(unittest.TestCase):
         self.assertTrue(models["models"])
         version = models["models"][0]["version_id"]
         calls = [self.repo.search_definitions("매출"), self.repo.get_dataset("order_lines"),
-                 self.repo.get_model_snapshot(),
+                 self.repo.get_definition(datasets=["orders"]),
                  self.repo.get_metric_lineage("order_lines", "revenue"),
                  self.repo.get_column_impact("olist", "main", "main", "orders", "order_id"),
                  self.repo.list_join_rules()]
@@ -42,13 +42,14 @@ class PublishedGraphTest(unittest.TestCase):
         self.assertEqual(calls[1]["source_kind"], "sql_query")
         self.assertEqual(calls[1]["tables_basis"], "field_lineage")
         self.assertGreater(len(calls[1]["tables"]), 1)
-        orders = next(item for item in calls[2]["definition"]["datasets"] if item["name"] == "orders")
+        self.assertEqual(calls[2]["datasets"], ["orders"])
+        orders, = calls[2]["definition"]["datasets"]
         self.assertTrue({"order_id", "order_status"} <= {f["name"] for f in orders["fields"]})
         self.assertEqual(len(calls[5]["rules"]), 9)
         self.assertIn("n_to_1", calls[5]["rules"][0])
 
     def test_calculated_dataset_definitions_include_registered_sources(self):
-        result = self.repo.get_model_snapshot()
+        result = self.repo.get_definition(datasets=["order_lines"])
         datasets = {item["name"]: item for item in result["definition"]["datasets"]}
         source = datasets["order_lines"]["source"]
         for name in ("order_items", "orders"):

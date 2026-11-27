@@ -26,8 +26,13 @@ _INDEX_UNAVAILABLE = re.compile(r"\bindex\b.*\b(does not exist|not online|popula
 _LUCENE_SPECIAL = re.compile(r'([+\-&|!(){}\[\]^"~*?:\\/])')
 
 RESULT_LIMIT = 128 * 1024  # tool results enter an LLM context
-SNAPSHOT_LIMIT = 1024 * 1024  # the snapshot is read by t2s, never by an LLM
-SNAPSHOT_VERSIONS = 8  # ponytail: oldest-first eviction, an LRU if many models are served at once
+DEFINITION_LIMIT = 1024 * 1024  # a scoped definition is read by t2s, never by an LLM
+INDEX_VERSIONS = 8  # ponytail: oldest-first eviction, an LRU if many models are served at once
+# Same as the text2sql plugin's engine.MAX_HOPS: t2s only follows join paths this long. Keep the two in sync.
+MAX_HOPS = 4
+_REF = re.compile(r"\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)\b")
+# Tables a SQL-source dataset reads. t2s only accepts one flat SELECT over FROM/JOIN table names there.
+_QUERY_TABLE = re.compile(r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){0,2})", re.I)
 
 
 def _rows(tx: Any, cypher: str, **params: Any) -> list[dict]:
@@ -53,6 +58,86 @@ def lucene_query(text: str) -> str:
     (lower-casing also keeps AND/OR/NOT from acting as operators), so input is searched as plain words."""
     words = [_LUCENE_SPECIAL.sub(r"\\\1", word) for word in text.lower().split()]
     return " OR ".join(words)
+
+
+def _distances(start: str, step: dict[str, set[str]], max_hops: int) -> dict[str, int]:
+    dist, frontier = {start: 0}, {start}
+    for hop in range(1, max_hops + 1):
+        frontier = {n for f in frontier for n in step.get(f, ())} - dist.keys()
+        dist.update(dict.fromkeys(frontier, hop))
+    return dist
+
+
+def scope_datasets(joins: list[dict], wanted: set[str], max_hops: int = MAX_HOPS) -> set[str]:
+    """Datasets t2s may touch to answer over `wanted`. The plugin engine picks a base dataset that reaches
+    every wanted one along N→1 joins and counts each path of up to max_hops joins between them. Every
+    dataset on such a path is kept, so path counts (and ambiguity) are the same as with the whole model.
+
+    A dataset outside `wanted` is a base candidate only when no wanted dataset reaches all the others
+    (customers and products, say, joined through order_items).
+    ponytail: when one does, the engine may still rank outside candidates by hops for duplicate-insensitive
+    metrics; leaving them out can pick another base on a tie. Keep them all if that ever matters."""
+    if not wanted:
+        return set()
+    out: dict[str, set[str]] = {}
+    into: dict[str, set[str]] = {}
+    for j in joins:
+        out.setdefault(j["from_dataset"], set()).add(j["to_dataset"])
+        into.setdefault(j["to_dataset"], set()).add(j["from_dataset"])
+    back = {w: _distances(w, into, max_hops) for w in wanted}  # who reaches w, and in how many joins
+    reach_all = set.intersection(*(set(d) for d in back.values()))
+    bases = set(wanted) if reach_all & wanted else set(wanted) | reach_all
+    keep = set(wanted)
+    for b in bases:
+        ahead = _distances(b, out, max_hops)
+        for dist in back.values():
+            keep |= {n for n, d in ahead.items() if n in dist and d + dist[n] <= max_hops}
+    return keep
+
+
+def _document(root: dict, datasets: list[dict], fields: list[dict], metrics: list[dict], joins: list[dict]) -> dict:
+    """Graph rows as an executable Ossie document (what t2s compiles and checks against)."""
+    by_name = {}
+    for item in datasets:
+        ds = {"name": item["name"], "source": item["source"],
+              "primary_key": item["primary_key"] or [],
+              "unique_keys": [key.split(",") for key in item["unique_keys"] or []],
+              "description": item["description"] or "", "fields": [], "metrics": []}
+        if item["instructions"]:
+            ds["ai_context"] = {"instructions": item["instructions"]}
+        by_name[ds["name"]] = ds
+    for item in fields:
+        if item["dataset"] not in by_name:
+            raise GraphError("SCHEMA_INCOMPATIBLE", "Field has no dataset")
+        field = {"name": item["name"], "expression": {"sql": item["expression"]},
+                 "datatype": item["datatype"], "description": item["description"] or ""}
+        if item["instructions"]:
+            field["ai_context"] = {"instructions": item["instructions"]}
+        by_name[item["dataset"]]["fields"].append(field)
+    top_metrics = []
+    for item in metrics:
+        metric = {"name": item["name"], "expression": {"sql": item["expression"]},
+                  "datatype": item["datatype"], "description": item["description"] or "",
+                  "nonportable_extensions": [{"vendor_name": "TEXT2SQL", "data": {"status": item["status"]}}]}
+        if item["instructions"]:
+            metric["ai_context"] = {"instructions": item["instructions"]}
+        if item["dataset"]:
+            if item["dataset"] not in by_name:
+                raise GraphError("SCHEMA_INCOMPATIBLE", "Metric has no dataset")
+            by_name[item["dataset"]]["metrics"].append(metric)
+        else:
+            top_metrics.append(metric)
+    relationships = [{"name": j["name"], "from": j["from_dataset"], "to": j["to_dataset"],
+                      "from_columns": j["from_columns"], "to_columns": j["to_columns"],
+                      "nonportable_extensions": [{"vendor_name": "TEXT2SQL", "data": {"status": j["status"]}}]}
+                     for j in joins]
+    definition = {"version": root["ossie_version"], "name": root["name"],
+                  "description": root["description"] or "", "datasets": list(by_name.values()),
+                  "metrics": top_metrics, "relationships": relationships,
+                  "nonportable_extensions": [{"vendor_name": "TEXT2SQL", "data": {"revision": root["revision"] or 0}}]}
+    if root["instructions"]:
+        definition["ai_context"] = {"instructions": root["instructions"]}
+    return definition
 
 
 class GraphRepository:
@@ -247,106 +332,119 @@ class GraphRepository:
                     "tables_basis": "field_lineage" if source_kind == "sql_query" else "direct"}
         return self._read(work)
 
-    def get_model_snapshot(self, model: str | None = None) -> dict:
-        """Return the active graph's executable semantic definition, in memory.
+    def _index(self, tx: Any, scope: dict) -> dict:
+        """Names, sources and joins of the active version, without fields. Small next to the definition,
+        and enough to decide which datasets a request needs. Kept per version: a published version never changes."""
+        indexes = self.__dict__.setdefault("_indexes", {})
+        key = (scope["tenant"], scope["model"], scope["version"])
+        if key in indexes:
+            return indexes[key]
+        datasets = _rows(tx, """
+            MATCH (d:Dataset {tenant:$tenant,model:$model,version:$version})
+            RETURN d.ref AS name, d.source AS source ORDER BY name
+        """, **scope)
+        if not datasets:
+            raise GraphError("SCHEMA_INCOMPATIBLE", "Active model has no datasets")
+        metrics = _rows(tx, """
+            MATCH (m:Metric {tenant:$tenant,model:$model,version:$version})
+            RETURN m.dataset AS dataset, m.name AS name,
+                   CASE WHEN m.dataset IS NULL THEN m.expression END AS expression
+            ORDER BY dataset,name
+        """, **scope)
+        joins = _rows(tx, """
+            MATCH (src:Dataset {tenant:$tenant,model:$model,version:$version})
+                  -[j:JOINS]->(dst:Dataset {tenant:$tenant,model:$model,version:$version})
+            RETURN j.name AS name, src.ref AS from_dataset, dst.ref AS to_dataset,
+                   j.from_columns AS from_columns, j.to_columns AS to_columns,
+                   j.status AS status
+            ORDER BY name,from_dataset,to_dataset
+        """, **scope)
+        index = {"datasets": datasets, "metrics": metrics, "joins": joins}
+        if len(indexes) >= INDEX_VERSIONS:
+            indexes.pop(next(iter(indexes)), None)
+        indexes[key] = index
+        return index
 
-        A published version never changes, so its built definition is kept per (tenant, model, version):
-        a repeat request costs one ActiveVersion read instead of six queries."""
-        snapshots = self.__dict__.setdefault("_snapshots", {})
+    def get_definition(self, model: str | None = None, datasets: list[str] = (), tables: list[str] = (),
+                       metrics: list[str] = (), with_definition: bool = True) -> dict:
+        """The part of the active definition that a t2s command needs, never the whole model.
 
+        Asked for datasets, physical tables and metric names, it returns those datasets, the datasets on
+        join paths between them (scope_datasets) and the joins among them, built as an Ossie document.
+        defined_tables says which of the given tables some dataset reads, so t2s can tell tables outside
+        the definition apart without the full table list. Its size follows the request, not the model."""
         def work(tx: Any) -> dict:
             scope = self._scope(tx, model)
-            cached = snapshots.get((scope["tenant"], scope["model"], scope["version"]))
-            if cached is not None:
-                return cached
+            index = self._index(tx, scope)
+            by_lower = {d["name"].lower(): d["name"] for d in index["datasets"]}
+            table_of = {d["name"]: d["source"].strip().lower().rpartition(".")[2]
+                        for d in index["datasets"] if isinstance(d["source"], str) and is_table_source(d["source"])}
+            wanted_tables = {t.strip().lower().rpartition(".")[2] for t in tables}
+            wanted = {by_lower[n.lower()] for n in datasets if n.lower() in by_lower}
+            wanted |= {d for d, t in table_of.items() if t in wanted_tables}
+            top, unknown_metrics = [], []
+            for name in metrics:
+                ds, dot, short = name.rpartition(".")
+                hits = [m for m in index["metrics"] if (m["dataset"], m["name"]) == (ds, short)] if dot else \
+                       [m for m in index["metrics"] if m["name"] == name]
+                if not hits:
+                    unknown_metrics.append(name)
+                for m in hits:
+                    if m["dataset"]:
+                        wanted.add(m["dataset"])
+                    else:  # a model metric reads the datasets its expression names
+                        top.append(m["name"])
+                        wanted |= {by_lower[d.lower()] for d, _ in _REF.findall(m["expression"] or "") if d.lower() in by_lower}
+            # Model metrics that read a wanted dataset are shown too (definition only, their other datasets
+            # are not pulled in); naming one, as compile does, brings every dataset it reads.
+            reads = {w.lower() for w in wanted}
+            top += [m["name"] for m in index["metrics"] if not m["dataset"] and m["name"] not in top
+                    and {d.lower() for d, _ in _REF.findall(m["expression"] or "")} & reads]
+            meta = {**self._metadata(scope),
+                    "defined_tables": sorted({t for t in table_of.values() if t in wanted_tables}),
+                    "unknown_datasets": sorted(n for n in datasets if n.lower() not in by_lower),
+                    "unknown_metrics": unknown_metrics, "datasets_total": len(index["datasets"])}
             root = _one(_rows(tx, """
                 MATCH (m:Model {tenant:$tenant,model:$model,version:$version})
                 RETURN m.ref AS name, m.description AS description,
                        m.ossie_version AS ossie_version, m.revision AS revision,
                        m.instructions AS instructions
             """, **scope), "model")
-            datasets = _rows(tx, """
-                MATCH (d:Dataset {tenant:$tenant,model:$model,version:$version})
+            meta.update(name=root["name"], revision=root["revision"] or 0)
+            if not with_definition:
+                return meta
+            names = scope_datasets(index["joins"], wanted)
+            # t2s checks that a SQL-source dataset reads only tables of other datasets, so bring those datasets.
+            read = {t.lower().rpartition(".")[2] for n in names if n not in table_of
+                    for t in _QUERY_TABLE.findall(next(d["source"] for d in index["datasets"] if d["name"] == n) or "")}
+            names = sorted(names | {d for d, t in table_of.items() if t in read})
+            p = {**scope, "names": names, "top": top}
+            rows = _rows(tx, """
+                MATCH (d:Dataset {tenant:$tenant,model:$model,version:$version}) WHERE d.ref IN $names
                 RETURN d.ref AS name, d.source AS source,
                        d.primary_key AS primary_key, d.unique_keys AS unique_keys,
                        d.description AS description, d.instructions AS instructions
                 ORDER BY name
-            """, **scope)
-            if not datasets:
-                raise GraphError("SCHEMA_INCOMPATIBLE", "Active model has no datasets")
+            """, **p)
             fields = _rows(tx, """
-                MATCH (f:Field {tenant:$tenant,model:$model,version:$version})
+                MATCH (f:Field {tenant:$tenant,model:$model,version:$version}) WHERE f.dataset IN $names
                 RETURN f.dataset AS dataset, f.name AS name, f.expression AS expression,
                        f.datatype AS datatype, f.description AS description,
                        f.instructions AS instructions
                 ORDER BY dataset,name
-            """, **scope)
-            metrics = _rows(tx, """
+            """, **p)
+            metric_rows = _rows(tx, """
                 MATCH (m:Metric {tenant:$tenant,model:$model,version:$version})
+                WHERE m.dataset IN $names OR (m.dataset IS NULL AND m.name IN $top)
                 RETURN m.dataset AS dataset, m.name AS name, m.expression AS expression,
                        m.datatype AS datatype, m.description AS description,
                        m.instructions AS instructions, m.status AS status
                 ORDER BY dataset,name
-            """, **scope)
-            joins = _rows(tx, """
-                MATCH (src:Dataset {tenant:$tenant,model:$model,version:$version})
-                      -[j:JOINS]->(dst:Dataset {tenant:$tenant,model:$model,version:$version})
-                RETURN j.name AS name, src.ref AS from_dataset, dst.ref AS to_dataset,
-                       j.from_columns AS from_columns, j.to_columns AS to_columns,
-                       j.status AS status
-                ORDER BY name,from_dataset,to_dataset
-            """, **scope)
-            by_name = {}
-            for item in datasets:
-                ds = {"name": item["name"], "source": item["source"],
-                      "primary_key": item["primary_key"] or [],
-                      "unique_keys": [key.split(",") for key in item["unique_keys"] or []],
-                      "description": item["description"] or "", "fields": [], "metrics": []}
-                if item["instructions"]:
-                    ds["ai_context"] = {"instructions": item["instructions"]}
-                by_name[ds["name"]] = ds
-            for item in fields:
-                if item["dataset"] not in by_name:
-                    raise GraphError("SCHEMA_INCOMPATIBLE", "Field has no dataset")
-                field = {"name": item["name"], "expression": {"sql": item["expression"]},
-                         "datatype": item["datatype"], "description": item["description"] or ""}
-                if item["instructions"]:
-                    field["ai_context"] = {"instructions": item["instructions"]}
-                by_name[item["dataset"]]["fields"].append(field)
-            top_metrics = []
-            for item in metrics:
-                metric = {"name": item["name"], "expression": {"sql": item["expression"]},
-                          "datatype": item["datatype"], "description": item["description"] or "",
-                          "nonportable_extensions": [{"vendor_name": "TEXT2SQL",
-                                                      "data": {"status": item["status"]}}]}
-                if item["instructions"]:
-                    metric["ai_context"] = {"instructions": item["instructions"]}
-                if item["dataset"]:
-                    if item["dataset"] not in by_name:
-                        raise GraphError("SCHEMA_INCOMPATIBLE", "Metric has no dataset")
-                    by_name[item["dataset"]]["metrics"].append(metric)
-                else:
-                    top_metrics.append(metric)
-            relationships = [{"name": j["name"], "from": j["from_dataset"], "to": j["to_dataset"],
-                              "from_columns": j["from_columns"], "to_columns": j["to_columns"],
-                              "nonportable_extensions": [{"vendor_name": "TEXT2SQL",
-                                                          "data": {"status": j["status"]}}]}
-                             for j in joins]
-            definition = {"version": root["ossie_version"], "name": root["name"],
-                          "description": root["description"] or "", "datasets": list(by_name.values()),
-                          "metrics": top_metrics, "relationships": relationships,
-                          "nonportable_extensions": [{"vendor_name": "TEXT2SQL",
-                                                      "data": {"revision": root["revision"] or 0}}]}
-            if root["instructions"]:
-                definition["ai_context"] = {"instructions": root["instructions"]}
-            return {**self._metadata(scope), "definition": definition}
-        result = self._read(work, limit=SNAPSHOT_LIMIT)
-        key = (result["tenant"], result["model"], result["version_id"])
-        if key not in snapshots:  # only after the size check passed
-            if len(snapshots) >= SNAPSHOT_VERSIONS:
-                snapshots.pop(next(iter(snapshots)), None)
-            snapshots[key] = result
-        return result
+            """, **p)
+            joins = [j for j in index["joins"] if j["from_dataset"] in names and j["to_dataset"] in names]
+            return {**meta, "datasets": names,
+                    "definition": _document(root, rows, fields, metric_rows, joins)}
+        return self._read(work, limit=DEFINITION_LIMIT)
 
     def get_metric_lineage(self, dataset: str, metric: str,
                            model: str | None = None) -> dict:

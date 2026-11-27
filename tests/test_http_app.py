@@ -13,12 +13,12 @@ class FakeRepository:
     def __init__(self, error=None):
         self.error, self.calls = error, []
 
-    def get_model_snapshot(self, model=None):
-        self.calls.append(model)
+    def get_definition(self, model=None, datasets=(), tables=(), metrics=(), with_definition=True):
+        self.calls.append((model, list(datasets), list(tables), list(metrics), with_definition))
         if self.error:
             raise self.error
-        return {"tenant": "olist", "model": model or "olist_sales", "version_id": "v1",
-                "definition": {"name": "olist_sales", "description": "매출", "datasets": []}}
+        out = {"tenant": "olist", "model": model or "olist_sales", "version_id": "v1", "defined_tables": []}
+        return {**out, "definition": {"name": "olist_sales", "datasets": []}} if with_definition else out
 
     def list_models(self):
         return {"tenant": "olist", "models": [{"model": "olist_sales", "version_id": "v1"}], "has_more": False}
@@ -37,9 +37,9 @@ class HTTPAppTest(unittest.TestCase):
                 "Authorization": "Bearer " + "t" * 40,
                 "Origin": "https://other.example.test",
             }).status_code, 403)
-            # No public domain yet: like /mcp, /snapshot does not check Host.
+            # No public domain yet: like /mcp, /definition does not check Host.
             with patch("text2sql_mcp.http_app.repository", return_value=FakeRepository()):
-                self.assertEqual(client.get("/snapshot", headers={
+                self.assertEqual(client.post("/definition", json={}, headers={
                     "Authorization": "Bearer " + "t" * 40}).status_code, 200)
 
     def test_health_auth_host_and_origin(self):
@@ -94,44 +94,49 @@ class HTTPAppTest(unittest.TestCase):
             self.assertEqual(result["structuredContent"], repo.list_models())
             self.assertEqual(result["content"], [])
 
-    def test_snapshot_route(self):
+    def test_definition_route(self):
         token = "t" * 40
         env = {"MCP_PUBLIC_HOST": "mcp.example.test", "MCP_API_TOKEN": token}
         with patch.dict(os.environ, env):
             from text2sql_mcp.http_app import create_app
         authorized = {"Authorization": f"Bearer {token}"}
+        body = {"datasets": ["order_lines"], "tables": ["orders"], "metrics": ["revenue"]}
         with TestClient(create_app(env), base_url="http://mcp.example.test") as client:
-            self.assertEqual(client.get("/snapshot").status_code, 401)
-            self.assertEqual(client.get("/snapshot", headers={"Authorization": "Bearer wrong"}).status_code, 401)
-            self.assertEqual(client.get("/snapshot", headers={
+            self.assertEqual(client.post("/definition", json=body).status_code, 401)
+            self.assertEqual(client.post("/definition", json=body, headers={"Authorization": "Bearer wrong"}).status_code, 401)
+            self.assertEqual(client.post("/definition", json=body, headers={
                 **authorized, "Origin": "https://other.example.test"}).status_code, 403)
             with patch("text2sql_mcp.http_app.repository", return_value=FakeRepository()):
                 # Same Host allow-list as /mcp (DNS-rebinding protection).
-                self.assertEqual(client.get("/snapshot", headers={
+                self.assertEqual(client.post("/definition", json=body, headers={
                     **authorized, "Host": "other.example.test"}).status_code, 421)
-                self.assertEqual(client.get("/snapshot", headers={
+                self.assertEqual(client.post("/definition", json=body, headers={
                     **authorized, "Host": "mcp.example.test:443"}).status_code, 200)
             repo = FakeRepository()
             with patch("text2sql_mcp.http_app.repository", return_value=repo):
-                default = client.get("/snapshot", headers=authorized)
-                named = client.get("/snapshot/other_model", headers=authorized)
-                conditional = {"If-None-Match": default.headers["etag"]}
-                cached = client.get("/snapshot", headers={**authorized, **conditional})
-                self.assertEqual((cached.status_code, cached.content), (304, b""))
-                self.assertEqual(client.get("/snapshot", headers=conditional).status_code, 401)
-                self.assertEqual(client.get("/snapshot/other_model", headers={**authorized, **conditional}).status_code, 200)
-                posted = client.post("/snapshot", headers=authorized)
+                default = client.post("/definition", json=body, headers=authorized)
+                named = client.post("/definition/other_model", json={"tables": ["orders"], "definition": False},
+                                    headers=authorized)
+                got = client.get("/definition", headers=authorized)
+                bad = [client.post("/definition", content=raw, headers={**authorized, "Content-Type": "application/json"})
+                       for raw in (b"[]", b"not json", b'{"datasets": "orders"}', b'{"datasets": [1]}',
+                                   b'{"definition": "yes"}', ('{"tables": [%s]}' % ",".join(['"t"'] * 501)).encode())]
             self.assertEqual(default.status_code, 200)
-            self.assertEqual(default.headers["content-type"], "application/json")
-            self.assertEqual(default.json(), FakeRepository().get_model_snapshot())
+            self.assertEqual(default.headers["cache-control"], "no-store")
+            self.assertIn("definition", default.json())
             self.assertEqual(named.json()["model"], "other_model")
-            self.assertEqual(repo.calls, [None, "other_model", None, "other_model"])
-            self.assertEqual(posted.status_code, 405)
+            self.assertNotIn("definition", named.json())
+            self.assertEqual(repo.calls, [(None, ["order_lines"], ["orders"], ["revenue"], True),
+                                          ("other_model", [], ["orders"], [], False)])
+            self.assertEqual(got.status_code, 405)
+            self.assertEqual([r.status_code for r in bad], [400] * 6)
+            self.assertNotIn("snapshot", client.app.__class__.__name__.lower())
+            self.assertEqual(client.get("/snapshot", headers=authorized).status_code, 404)  # removed in 0.4.0
             for code, status in (("NOT_FOUND", 404), ("NO_ACTIVE_VERSION", 404),
                                  ("DB_UNAVAILABLE", 503), ("RESULT_TOO_LARGE", 500)):
                 failing = FakeRepository(GraphError(code, "reason"))
                 with patch("text2sql_mcp.http_app.repository", return_value=failing):
-                    response = client.get("/snapshot", headers=authorized)
+                    response = client.post("/definition", json=body, headers=authorized)
                 self.assertEqual(response.status_code, status)
                 self.assertEqual(response.json(), {"error": {"code": code, "message": "reason"}})
 

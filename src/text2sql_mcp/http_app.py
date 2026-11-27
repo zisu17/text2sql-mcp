@@ -2,36 +2,55 @@
 
 from __future__ import annotations
 
-from hashlib import sha256
 import hmac
 import os
 from typing import Mapping
 
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.concurrency import run_in_threadpool
+from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .contracts import GraphError
 from .server import mcp, repository
 
-_STATUS = {"NOT_FOUND": 404, "NO_ACTIVE_VERSION": 404, "DB_UNAVAILABLE": 503}
+_STATUS = {"NOT_FOUND": 404, "NO_ACTIVE_VERSION": 404, "DB_UNAVAILABLE": 503, "INVALID_INPUT": 400}
 
 
-async def _snapshot(scope: Scope) -> Response:
-    """GET /snapshot[/{model}]: the executable model for t2s. Not an MCP tool, so no LLM can call it."""
-    if scope["method"] != "GET":
-        return PlainTextResponse("Method Not Allowed", status_code=405, headers={"Allow": "GET"})
-    model = scope["path"][len("/snapshot"):].lstrip("/") or None
+_NAMES = 500  # names per request; one question names a handful
+
+
+def _names(body: object) -> dict | None:
+    """The request's datasets/tables/metrics lists, or None when the body has another shape."""
+    if not isinstance(body, dict) or not isinstance(body.get("definition", True), bool):
+        return None
+    lists = {key: body.get(key, []) for key in ("datasets", "tables", "metrics")}
+    ok = all(isinstance(v, list) and len(v) <= _NAMES and all(isinstance(x, str) and 0 < len(x) <= 200 for x in v)
+             for v in lists.values())
+    return lists if ok else None
+
+
+async def _definition(scope: Scope, receive: Receive) -> Response:
+    """POST /definition[/{model}]: the part of the active definition one t2s command needs, never the whole
+    model. The JSON body names datasets, physical tables and metrics. Not an MCP tool, so no LLM calls it."""
+    if scope["method"] != "POST":
+        return PlainTextResponse("Method Not Allowed", status_code=405, headers={"Allow": "POST"})
+    model = scope["path"][len("/definition"):].lstrip("/") or None
+    try:
+        body = await Request(scope, receive).json()
+    except ValueError:
+        body = None
+    lists = _names(body)
+    if lists is None:
+        return JSONResponse({"error": {"code": "INVALID_INPUT", "message": (
+            "Body must be a JSON object with optional datasets, tables and metrics lists of names "
+            f"(at most {_NAMES} each) and an optional boolean definition")}}, status_code=400)
     try:
         # The Neo4j driver is synchronous; keep it off the event loop.
-        response = JSONResponse(await run_in_threadpool(repository().get_model_snapshot, model=model))
-        etag = '"' + sha256(response.body).hexdigest() + '"'
-        headers = {"ETag": etag, "Cache-Control": "private, no-cache", "Vary": "Authorization"}
-        if any(k.lower() == b"if-none-match" and v == etag.encode("ascii") for k, v in scope["headers"]):
-            return Response(status_code=304, headers=headers)
-        response.headers.update(headers)
-        return response
+        result = await run_in_threadpool(repository().get_definition, model=model,
+                                         with_definition=body.get("definition", True), **lists)
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
     except GraphError as error:
         return JSONResponse({"error": {"code": error.code, "message": error.args[0]}},
                             status_code=_STATUS.get(error.code, 500))
@@ -43,7 +62,7 @@ class BearerAuth:
     def __init__(self, app: ASGIApp, token: str, host: str = ""):
         self.app = app
         self.expected = f"Bearer {token}".encode("ascii")
-        self.host = host  # the MCP app checks Host itself; /snapshot is answered here, so check it the same way
+        self.host = host  # the MCP app checks Host itself; /definition is answered here, so check it the same way
 
     def _host_allowed(self, scope: Scope) -> bool:
         if not self.host:
@@ -68,11 +87,11 @@ class BearerAuth:
                                     headers={"WWW-Authenticate": "Bearer"})(scope, receive, send)
             return
         path = scope.get("path", "")
-        if path == "/snapshot" or path.startswith("/snapshot/"):
+        if path == "/definition" or path.startswith("/definition/"):
             if not self._host_allowed(scope):  # same allow-list as TransportSecuritySettings on /mcp
                 await PlainTextResponse("Invalid Host header", status_code=421)(scope, receive, send)
                 return
-            await (await _snapshot(scope))(scope, receive, send)
+            await (await _definition(scope, receive))(scope, receive, send)
             return
         await self.app(scope, receive, send)
 

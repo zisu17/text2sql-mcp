@@ -49,7 +49,7 @@ Railway에서는 `Dockerfile`로 HTTP 앱을 실행하고 Neo4j AuraDB에 TLS로
 
 정의 검색은 기본으로 후보 1건을 반환합니다. 후보가 충분하지 않고 `has_more`가 참이면 `limit`(최대 50)을 높여 다시 조회합니다. 성공한 도구 호출의 JSON은 `structuredContent`에서 읽습니다. 오류 메시지는 `content`에 들어갑니다.
 
-실행용 시맨틱 모델 전체는 MCP 도구로 제공하지 않습니다. LLM이 모델 전체를 불러오지 않게 하기 위해서입니다. 파일 없이 SQL을 생성하는 클라이언트(`t2s`)는 HTTP 앱의 `GET /snapshot`(기본 모델) 또는 `GET /snapshot/{model}`을 `/mcp`와 같은 Bearer 토큰으로 호출합니다. 응답은 `tenant`, `model`, `version_id`, `definition`이 든 JSON이며 1 MiB까지 허용합니다. 서버는 버전별로 만든 정의를 메모리에 최대 8개 보관하므로, 같은 활성 버전을 다시 요청하면 활성 버전 확인 조회 한 번으로 답합니다. 클라이언트가 이전 응답의 ETag를 `If-None-Match`로 보내면 인증과 활성 모델 확인을 거친 뒤 내용이 같을 때 HTTP 304를 반환합니다. 오류는 `{"error": {"code", "message"}}`와 상태 코드(모델 없음 404, Neo4j 접속 실패 503, 그 밖 500)로 반환합니다. stdio 실행에는 이 경로가 없습니다.
+실행용 시맨틱 모델 전체는 MCP 도구로 제공하지 않습니다. LLM이 모델 전체를 불러오지 않게 하기 위해서입니다. 파일 없이 SQL을 생성하는 클라이언트(`t2s`)는 HTTP 앱의 `POST /definition`(기본 모델) 또는 `POST /definition/{model}`을 `/mcp`와 같은 Bearer 토큰으로 호출합니다. 본문 JSON에 명령이 쓰는 `datasets`(데이터셋 이름), `tables`(실제 테이블 이름), `metrics`(지표 이름) 목록을 넣으면, 서버는 그 데이터셋과 그 사이 연결 경로(4번 연결 이내)에 있는 데이터셋, 그 안의 연결만 담은 Ossie 문서를 `definition`으로 돌려줍니다. 계산용 데이터셋이 조회문에서 읽는 표의 데이터셋도 함께 줍니다. 모델 전체는 어떤 경로로도 주지 않습니다. 응답 크기는 정의 전체가 아니라 질문이 닿는 범위를 따릅니다. `defined_tables`는 요청한 테이블 중 정의가 읽는 테이블입니다. `"definition": false`면 정의 없이 이름·번호·`defined_tables`만 줍니다. 서버는 버전마다 데이터셋 이름·소스·연결 목록(필드 제외)을 메모리에 최대 8개 보관해 범위를 계산합니다. 오류는 `{"error": {"code", "message"}}`와 상태 코드(잘못된 본문 400, 모델 없음 404, Neo4j 접속 실패 503, 그 밖 500)로 반환합니다. stdio 실행에는 이 경로가 없습니다.
 
 모든 정의 조회는 `ActiveVersion.commit`과 `Model.version`이 일치하는 현재 버전으로 한정됩니다. 응답의 `version_id`는 이 활성 커밋 값입니다. 물리 컬럼은 `source_id`, `catalog`, `schema`, `table`, `column`으로 식별합니다. `row_set_candidate`는 `DERIVED_FROM`의 `roles`(예전 그래프는 `role`)에 `join`이 든 영향 후보입니다. 값과 조인 키를 함께 맡는 필드는 값 영향(`impact: value`)이면서 `row_set_candidate: true`입니다. SQL 소스의 물리 테이블 목록은 필드 계보에서 찾은 범위만 반환하며 `tables_basis=field_lineage`로 표시합니다.
 
@@ -66,6 +66,11 @@ GitHub Actions의 이미지 게시는 `uv sync --frozen`과 이 단위 테스트
 로컬 그래프 통합 테스트는 `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`를 설정한 뒤 `GRAPH_INTEGRATION_TEST=1`을 추가하면 실행됩니다.
 
 ## 변경 사항
+
+### 0.4.0 (깨지는 변경)
+
+- 모델 전체를 주던 `GET /snapshot`을 지웠습니다. 정의가 커지면 명령마다 모델 전체를 받을 수 없기 때문입니다. `t2s`는 `POST /definition`으로 명령이 쓰는 데이터셋과 그 사이 연결 경로만 받습니다. text2sql-plugin 0.6.x 이하는 이 서버에서 `graph_unavailable`로 실패하므로 플러그인을 0.7.0 이상으로 올립니다. 배포는 이 서버를 먼저, 플러그인을 다음에 합니다.
+- `/definition`도 `/mcp`와 같은 토큰·Host 허용 목록을 거칩니다.
 
 ### 0.3.0 (깨지는 변경)
 

@@ -55,7 +55,7 @@ class MCPToolsTest(unittest.TestCase):
                 self.assertEqual([item["ref"] for item in expanded.structured_content["items"]],
                                  ["revenue", "item_price_total"])
                 self.assertFalse(expanded.structured_content["has_more"])
-                # The full model is served to t2s over GET /snapshot, never as an LLM-callable tool.
+                # Scoped definitions are served to t2s over HTTP outside the MCP tool list.
                 self.assertNotIn("graph_get_model_snapshot", {tool.name for tool in tools})
                 self.assertEqual((await client.list_resources()).resources, [])
         asyncio.run(run())

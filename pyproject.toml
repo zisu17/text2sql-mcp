@@ -1,6 +1,6 @@
 [project]
 name = "text2sql-graph-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "Read-only MCP access to the Text2SQL metadata graph"
 requires-python = ">=3.11"
 dependencies = ["mcp>=2,<3", "neo4j>=6,<7", "starlette>=1,<2", "uvicorn>=0.30,<1"]
